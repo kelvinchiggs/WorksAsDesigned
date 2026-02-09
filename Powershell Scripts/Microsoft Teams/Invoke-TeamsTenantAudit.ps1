@@ -1,0 +1,3847 @@
+<#
+.SYNOPSIS
+    Microsoft Teams Tenant Compliance and Configuration Audit Script
+    
+.DESCRIPTION
+    This script performs a comprehensive audit of a Microsoft Teams tenant configuration,
+    collecting settings across Teams management, devices, apps, meetings, messaging,
+    governance, lifecycle management, and security compliance areas. The script generates
+    detailed Word and Excel reports comparing current settings against default values
+    and industry best practices with recommendations for optimization.
+    
+    Audit Areas Covered:
+    - Teams Feature Management (Teams, Settings, Policies, Templates, Updates, Upgrades)
+    - Teams Devices (Rooms on Windows/Android/Surface Hub, Panels, Phones, Displays, SIP)
+    - Teams App Management (Org-wide Settings, Apps, Permission/Setup Policies, Store)
+    - Microsoft Teams Meetings (Conference Bridge, Audio/Meeting Policies, Live Events)
+    - Messaging Policies
+    - Enhanced Encryption Policies
+    - Governance (Team Creation, Naming, Sensitivity Labels, External/Guest Access)
+    - Lifecycle Management (Expiration, Retention Policies)
+    - Security and Compliance (DLP, Conditional Access, Defender, PIM, Information Barriers)
+    
+.PARAMETER OutputPath
+    Optional. Specifies the directory where output files will be saved.
+    Defaults to the user My Documents folder.
+    
+.PARAMETER Interactive
+    Optional. When specified, uses interactive authentication for Microsoft Graph
+    and Teams connections. Default is $true.
+    
+.PARAMETER TenantId
+    Optional. Specifies the Azure AD tenant ID for authentication.
+    Required for non-interactive authentication scenarios.
+    
+.PARAMETER ClientId
+    Optional. Specifies the Azure AD application (client) ID for app-based authentication.
+    Required for non-interactive authentication with client secret or certificate.
+    
+.PARAMETER ClientSecret
+    Optional. Specifies the client secret for app-based authentication.
+    Use with ClientId and TenantId for non-interactive scenarios.
+    
+.PARAMETER CertificateThumbprint
+    Optional. Specifies the certificate thumbprint for certificate-based authentication.
+    Use with ClientId and TenantId for secure non-interactive scenarios.
+    
+.EXAMPLE
+    .\Invoke-TeamsComplianceAudit.ps1
+    Runs the audit with interactive authentication and outputs to My Documents.
+    
+.EXAMPLE
+    .\Invoke-TeamsComplianceAudit.ps1 -OutputPath "C:\Reports" -TenantId "contoso.onmicrosoft.com"
+    Runs the audit with specified tenant and custom output location.
+    
+.EXAMPLE
+    .\Invoke-TeamsComplianceAudit.ps1 -TenantId "guid" -ClientId "appguid" -ClientSecret "secret"
+    Runs the audit using app-based authentication with client secret.
+    
+.NOTES
+    Script Name    : Invoke-TeamsComplianceAudit.ps1
+    Version        : 1.0.0
+    Author         : Kelvin Chigorimbo
+    Creation Date  : 2025
+    
+    Required Modules:
+    - MicrosoftTeams (minimum version 5.0.0)
+    - Microsoft.Graph.Authentication
+    - Microsoft.Graph.Teams
+    - Microsoft.Graph.Identity.DirectoryManagement
+    - Microsoft.Graph.Identity.Governance
+    - Microsoft.Graph.DeviceManagement
+    - ExchangeOnlineManagement
+    - ImportExcel
+    
+    Required Permissions (Microsoft Graph):
+    - Team.ReadBasic.All
+    - TeamSettings.Read.All
+    - Policy.Read.All
+    - DeviceManagementConfiguration.Read.All
+    - Directory.Read.All
+    - RoleManagement.Read.Directory
+    - InformationProtectionPolicy.Read
+    
+    Required Permissions (Teams Admin):
+    - Teams Administrator or Global Administrator role
+    
+.LINK
+    https://docs.microsoft.com/en-us/microsoftteams/
+    https://docs.microsoft.com/en-us/graph/api/resources/teams-api-overview
+#>
+
+#Requires -Version 5.1
+
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory = $false)]
+    [string]$OutputPath = [Environment]::GetFolderPath('MyDocuments'),
+    
+    [Parameter(Mandatory = $false)]
+    [switch]$Interactive = $true,
+    
+    [Parameter(Mandatory = $false)]
+    [string]$TenantId,
+    
+    [Parameter(Mandatory = $false)]
+    [string]$ClientId,
+    
+    [Parameter(Mandatory = $false)]
+    [string]$ClientSecret,
+    
+    [Parameter(Mandatory = $false)]
+    [string]$CertificateThumbprint
+)
+
+#region Script Configuration
+# Script-level variables for consistent operation across all functions
+$script:ScriptName = "Invoke-TeamsComplianceAudit"
+$script:ScriptVersion = "1.0.0"
+$script:StartTime = Get-Date
+$script:LogFile = $null
+$script:AuditResults = @{}
+$script:ErrorCount = 0
+$script:WarningCount = 0
+
+# Color configuration for console output providing visual feedback
+$script:Colors = @{
+    Success = "Green"
+    Warning = "Yellow"
+    Error   = "Red"
+    Info    = "Cyan"
+    Header  = "Magenta"
+}
+#endregion
+
+#region Logging Functions
+function Initialize-LogFile {
+    <#
+    .SYNOPSIS
+        Initializes the log file for the audit session.
+    .DESCRIPTION
+        Creates a timestamped log file in the specified output directory to record
+        all operations, errors, and audit findings during script execution.
+    #>
+    [CmdletBinding()]
+    param()
+    
+    try {
+        # Validate output path exists
+        if (-not (Test-Path -Path $OutputPath -PathType Container)) {
+            New-Item -Path $OutputPath -ItemType Directory -Force | Out-Null
+        }
+        
+        # Generate timestamp for unique log file naming
+        $timestamp = $script:StartTime.ToString("yyyyMMdd_HHmmss")
+        $script:LogFile = Join-Path -Path $OutputPath -ChildPath "TeamsAudit_$timestamp.log"
+        
+        # Create log file with header information
+        $logHeader = @"
+================================================================================
+Microsoft Teams Tenant Compliance Audit Log
+================================================================================
+Script Name    : $($script:ScriptName)
+Script Version : $($script:ScriptVersion)
+Start Time     : $($script:StartTime.ToString("yyyy-MM-dd HH:mm:ss"))
+Output Path    : $OutputPath
+Computer Name  : $($env:COMPUTERNAME)
+User Context   : $($env:USERNAME)
+PowerShell Ver : $($PSVersionTable.PSVersion.ToString())
+================================================================================
+
+"@
+        $logHeader | Out-File -FilePath $script:LogFile -Encoding UTF8
+        
+        Write-Host "Log file initialized: $($script:LogFile)" -ForegroundColor $script:Colors.Info
+        return $true
+    }
+    catch {
+        Write-Host "Failed to initialize log file: $($_.Exception.Message)" -ForegroundColor $script:Colors.Error
+        return $false
+    }
+}
+
+function Write-AuditLog {
+    <#
+    .SYNOPSIS
+        Writes a message to both the console and log file.
+    .DESCRIPTION
+        Provides centralized logging functionality with timestamp, severity level,
+        and dual output to console (with color coding) and log file.
+    .PARAMETER Message
+        The message text to log. Can be empty for blank line output.
+    .PARAMETER Level
+        The severity level: Info, Warning, Error, Success, or Header.
+    .PARAMETER NoConsole
+        When specified, writes only to log file without console output.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [string]$Message = "",
+        
+        [Parameter(Mandatory = $false)]
+        [ValidateSet("Info", "Warning", "Error", "Success", "Header")]
+        [string]$Level = "Info",
+        
+        [Parameter(Mandatory = $false)]
+        [switch]$NoConsole
+    )
+    
+    # Format timestamp for log entry
+    $timestamp = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+    
+    # Handle empty messages for blank line output
+    if ([string]::IsNullOrEmpty($Message)) {
+        if (-not $NoConsole) {
+            Write-Host ""
+        }
+        if ($script:LogFile -and (Test-Path -Path $script:LogFile -PathType Leaf)) {
+            "" | Out-File -FilePath $script:LogFile -Append -Encoding UTF8
+        }
+        return
+    }
+    
+    $logEntry = "[$timestamp] [$Level] $Message"
+    
+    # Write to log file if initialized
+    if ($script:LogFile -and (Test-Path -Path $script:LogFile -PathType Leaf)) {
+        $logEntry | Out-File -FilePath $script:LogFile -Append -Encoding UTF8
+    }
+    
+    # Write to console with appropriate color unless suppressed
+    if (-not $NoConsole) {
+        $color = switch ($Level) {
+            "Success" { $script:Colors.Success }
+            "Warning" { $script:Colors.Warning; $script:WarningCount++ }
+            "Error"   { $script:Colors.Error; $script:ErrorCount++ }
+            "Header"  { $script:Colors.Header }
+            default   { $script:Colors.Info }
+        }
+        Write-Host $Message -ForegroundColor $color
+    }
+}
+#endregion
+
+#region Module and Prerequisite Functions
+function Test-RequiredModules {
+    <#
+    .SYNOPSIS
+        Validates that all required PowerShell modules are installed and available.
+    .DESCRIPTION
+        Checks for the presence of required modules for Teams, Graph API, Exchange,
+        and Excel export functionality. Reports missing modules with installation guidance.
+    .OUTPUTS
+        Returns $true if all required modules are available, $false otherwise.
+    #>
+    [CmdletBinding()]
+    param()
+    
+    Write-AuditLog -Message "Validating required PowerShell modules..." -Level Header
+    
+    # Define required modules with minimum versions where applicable
+    $requiredModules = @(
+        @{ Name = "MicrosoftTeams"; MinVersion = "5.0.0" }
+        @{ Name = "Microsoft.Graph.Authentication"; MinVersion = $null }
+        @{ Name = "Microsoft.Graph.Teams"; MinVersion = $null }
+        @{ Name = "Microsoft.Graph.Identity.DirectoryManagement"; MinVersion = $null }
+        @{ Name = "Microsoft.Graph.Identity.Governance"; MinVersion = $null }
+        @{ Name = "Microsoft.Graph.DeviceManagement"; MinVersion = $null }
+        @{ Name = "ExchangeOnlineManagement"; MinVersion = "3.0.0" }
+        @{ Name = "ImportExcel"; MinVersion = $null }
+    )
+    
+    $missingModules = @()
+    $totalModules = $requiredModules.Count
+    $currentModule = 0
+    
+    foreach ($module in $requiredModules) {
+        $currentModule++
+        $percentComplete = [math]::Round(($currentModule / $totalModules) * 100)
+        
+        Write-Progress -Activity "Checking Required Modules" `
+                       -Status "Checking $($module.Name)" `
+                       -PercentComplete $percentComplete
+        
+        $installedModule = Get-Module -Name $module.Name -ListAvailable | 
+                          Sort-Object Version -Descending | 
+                          Select-Object -First 1
+        
+        if (-not $installedModule) {
+            $missingModules += $module.Name
+            Write-AuditLog -Message "  [MISSING] $($module.Name) - Not installed" -Level Error
+        }
+        elseif ($module.MinVersion -and ($installedModule.Version -lt [Version]$module.MinVersion)) {
+            $missingModules += "$($module.Name) (requires v$($module.MinVersion)+)"
+            Write-AuditLog -Message "  [OUTDATED] $($module.Name) v$($installedModule.Version) - Requires v$($module.MinVersion)+" -Level Warning
+        }
+        else {
+            Write-AuditLog -Message "  [OK] $($module.Name) v$($installedModule.Version)" -Level Success
+        }
+    }
+    
+    Write-Progress -Activity "Checking Required Modules" -Completed
+    
+    if ($missingModules.Count -gt 0) {
+        Write-AuditLog -Message "`nMissing or outdated modules detected. Install using:" -Level Warning
+        Write-AuditLog -Message "Install-Module -Name <ModuleName> -Scope CurrentUser -Force" -Level Info
+        Write-AuditLog -Message "`nMissing modules: $($missingModules -join ', ')" -Level Error
+        return $false
+    }
+    
+    Write-AuditLog -Message "All required modules validated successfully." -Level Success
+    return $true
+}
+
+function Import-RequiredModules {
+    <#
+    .SYNOPSIS
+        Imports all required PowerShell modules into the current session.
+    .DESCRIPTION
+        Loads the necessary modules for Teams administration, Microsoft Graph API,
+        Exchange Online management, and Excel export functionality.
+    .OUTPUTS
+        Returns $true if all modules imported successfully, $false otherwise.
+    #>
+    [CmdletBinding()]
+    param()
+    
+    Write-AuditLog -Message "Importing required PowerShell modules..." -Level Header
+    
+    $modulesToImport = @(
+        "MicrosoftTeams"
+        "Microsoft.Graph.Authentication"
+        "Microsoft.Graph.Teams"
+        "Microsoft.Graph.Identity.DirectoryManagement"
+        "Microsoft.Graph.Identity.Governance"
+        "Microsoft.Graph.DeviceManagement"
+        "ExchangeOnlineManagement"
+        "ImportExcel"
+    )
+    
+    $totalModules = $modulesToImport.Count
+    $currentModule = 0
+    $importErrors = @()
+    
+    foreach ($moduleName in $modulesToImport) {
+        $currentModule++
+        $percentComplete = [math]::Round(($currentModule / $totalModules) * 100)
+        
+        Write-Progress -Activity "Importing Modules" `
+                       -Status "Loading $moduleName" `
+                       -PercentComplete $percentComplete
+        
+        try {
+            Import-Module -Name $moduleName -ErrorAction Stop
+            Write-AuditLog -Message "  Imported: $moduleName" -Level Success
+        }
+        catch {
+            $importErrors += $moduleName
+            Write-AuditLog -Message "  Failed to import: $moduleName - $($_.Exception.Message)" -Level Error
+        }
+    }
+    
+    Write-Progress -Activity "Importing Modules" -Completed
+    
+    if ($importErrors.Count -gt 0) {
+        Write-AuditLog -Message "Failed to import modules: $($importErrors -join ', ')" -Level Error
+        return $false
+    }
+    
+    Write-AuditLog -Message "All modules imported successfully." -Level Success
+    return $true
+}
+#endregion
+
+#region Authentication Functions
+function Connect-AuditServices {
+    <#
+    .SYNOPSIS
+        Establishes connections to all required Microsoft services for the audit.
+    .DESCRIPTION
+        Connects to Microsoft Teams, Microsoft Graph API, and Exchange Online
+        using the specified authentication method (interactive or app-based).
+    .OUTPUTS
+        Returns $true if all connections established successfully, $false otherwise.
+    #>
+    [CmdletBinding()]
+    param()
+    
+    Write-AuditLog -Message "Establishing connections to Microsoft services..." -Level Header
+    
+    $connectionSuccess = $true
+    
+    # Connect to Microsoft Teams
+    Write-AuditLog -Message "Connecting to Microsoft Teams..." -Level Info
+    try {
+        if ($Interactive) {
+            if ($TenantId) {
+                Connect-MicrosoftTeams -TenantId $TenantId -ErrorAction Stop | Out-Null
+            }
+            else {
+                Connect-MicrosoftTeams -ErrorAction Stop | Out-Null
+            }
+        }
+        elseif ($CertificateThumbprint) {
+            Connect-MicrosoftTeams -TenantId $TenantId -ApplicationId $ClientId `
+                                   -CertificateThumbprint $CertificateThumbprint -ErrorAction Stop | Out-Null
+        }
+        elseif ($ClientSecret) {
+            $secureSecret = ConvertTo-SecureString -String $ClientSecret -AsPlainText -Force
+            $credential = New-Object System.Management.Automation.PSCredential($ClientId, $secureSecret)
+            Connect-MicrosoftTeams -TenantId $TenantId -Credential $credential -ErrorAction Stop | Out-Null
+        }
+        Write-AuditLog -Message "  Connected to Microsoft Teams successfully." -Level Success
+    }
+    catch {
+        Write-AuditLog -Message "  Failed to connect to Microsoft Teams: $($_.Exception.Message)" -Level Error
+        $connectionSuccess = $false
+    }
+    
+    # Connect to Microsoft Graph
+    Write-AuditLog -Message "Connecting to Microsoft Graph..." -Level Info
+    try {
+        $graphScopes = @(
+            "Team.ReadBasic.All"
+            "TeamSettings.Read.All"
+            "Policy.Read.All"
+            "DeviceManagementConfiguration.Read.All"
+            "Directory.Read.All"
+            "RoleManagement.Read.Directory"
+            "InformationProtectionPolicy.Read"
+            "User.Read.All"
+            "Group.Read.All"
+        )
+        
+        if ($Interactive) {
+            if ($TenantId) {
+                Connect-MgGraph -Scopes $graphScopes -TenantId $TenantId -ErrorAction Stop | Out-Null
+            }
+            else {
+                Connect-MgGraph -Scopes $graphScopes -ErrorAction Stop | Out-Null
+            }
+        }
+        elseif ($CertificateThumbprint) {
+            Connect-MgGraph -TenantId $TenantId -ClientId $ClientId `
+                           -CertificateThumbprint $CertificateThumbprint -ErrorAction Stop | Out-Null
+        }
+        elseif ($ClientSecret) {
+            $secureSecret = ConvertTo-SecureString -String $ClientSecret -AsPlainText -Force
+            $clientCredential = New-Object System.Management.Automation.PSCredential($ClientId, $secureSecret)
+            Connect-MgGraph -TenantId $TenantId -ClientSecretCredential $clientCredential -ErrorAction Stop | Out-Null
+        }
+        Write-AuditLog -Message "  Connected to Microsoft Graph successfully." -Level Success
+    }
+    catch {
+        Write-AuditLog -Message "  Failed to connect to Microsoft Graph: $($_.Exception.Message)" -Level Error
+        $connectionSuccess = $false
+    }
+    
+    # Connect to Exchange Online
+    Write-AuditLog -Message "Connecting to Exchange Online..." -Level Info
+    try {
+        if ($Interactive) {
+            if ($TenantId) {
+                Connect-ExchangeOnline -Organization $TenantId -ShowBanner:$false -ErrorAction Stop
+            }
+            else {
+                Connect-ExchangeOnline -ShowBanner:$false -ErrorAction Stop
+            }
+        }
+        elseif ($CertificateThumbprint) {
+            Connect-ExchangeOnline -Organization $TenantId -AppId $ClientId `
+                                  -CertificateThumbprint $CertificateThumbprint -ShowBanner:$false -ErrorAction Stop
+        }
+        Write-AuditLog -Message "  Connected to Exchange Online successfully." -Level Success
+    }
+    catch {
+        Write-AuditLog -Message "  Warning: Could not connect to Exchange Online: $($_.Exception.Message)" -Level Warning
+        Write-AuditLog -Message "  Some audit data may be unavailable." -Level Warning
+    }
+    
+    return $connectionSuccess
+}
+
+function Disconnect-AuditServices {
+    <#
+    .SYNOPSIS
+        Disconnects from all Microsoft services used during the audit.
+    .DESCRIPTION
+        Cleanly terminates connections to Microsoft Teams, Graph API, and Exchange Online
+        to release resources and clear authentication tokens.
+    #>
+    [CmdletBinding()]
+    param()
+    
+    Write-AuditLog -Message "Disconnecting from Microsoft services..." -Level Info
+    
+    try {
+        Disconnect-MicrosoftTeams -ErrorAction SilentlyContinue
+        Write-AuditLog -Message "  Disconnected from Microsoft Teams." -Level Info
+    }
+    catch { }
+    
+    try {
+        Disconnect-MgGraph -ErrorAction SilentlyContinue
+        Write-AuditLog -Message "  Disconnected from Microsoft Graph." -Level Info
+    }
+    catch { }
+    
+    try {
+        Disconnect-ExchangeOnline -Confirm:$false -ErrorAction SilentlyContinue
+        Write-AuditLog -Message "  Disconnected from Exchange Online." -Level Info
+    }
+    catch { }
+}
+#endregion
+
+#region Best Practices Reference Data
+function Get-BestPracticesReference {
+    <#
+    .SYNOPSIS
+        Returns the reference data for default settings and best practices.
+    .DESCRIPTION
+        Provides a comprehensive hashtable containing Microsoft Teams default settings,
+        industry best practices, and explanatory notes for each configuration area.
+    #>
+    [CmdletBinding()]
+    param()
+    
+    $bestPractices = @{
+        TeamsSettings = @{
+            AllowEmailIntoChannel = @{
+                Default = $true
+                BestPractice = $true
+                Explanation = "Allows users to send emails directly to Teams channels using channel email addresses."
+                Recommendation = "Enable to facilitate email integration with Teams channels for information sharing."
+            }
+            AllowGuestCreateUpdateChannels = @{
+                Default = $true
+                BestPractice = $false
+                Explanation = "Controls whether guest users can create and modify channels within teams they are members of."
+                Recommendation = "Disable to maintain channel structure control. Guests should collaborate within existing channels."
+            }
+            AllowGuestDeleteChannels = @{
+                Default = $false
+                BestPractice = $false
+                Explanation = "Controls whether guest users can delete channels within teams."
+                Recommendation = "Keep disabled to prevent data loss and maintain channel integrity."
+            }
+            AllowResourceAccountSendMessage = @{
+                Default = $true
+                BestPractice = $true
+                Explanation = "Allows resource accounts (like meeting room accounts) to send messages."
+                Recommendation = "Enable for meeting room integration scenarios."
+            }
+        }
+        
+        MeetingPolicies = @{
+            AllowAnonymousUsersToJoinMeeting = @{
+                Default = $true
+                BestPractice = $false
+                Explanation = "Allows users without Microsoft accounts to join meetings as anonymous participants."
+                Recommendation = "Disable for internal meetings to enhance security. Enable only for specific external collaboration policies."
+            }
+            AllowAnonymousUsersToStartMeeting = @{
+                Default = $false
+                BestPractice = $false
+                Explanation = "Allows anonymous users to start meetings without waiting for authenticated users."
+                Recommendation = "Keep disabled to ensure meeting control remains with authenticated organizers."
+            }
+            AutoAdmittedUsers = @{
+                Default = "EveryoneInCompanyExcludingGuests"
+                BestPractice = "EveryoneInCompanyExcludingGuests"
+                Explanation = "Determines who automatically bypasses the lobby when joining meetings."
+                Recommendation = "Set to 'EveryoneInCompanyExcludingGuests' to balance security with user experience."
+            }
+            AllowCloudRecording = @{
+                Default = $true
+                BestPractice = $true
+                Explanation = "Enables cloud recording capability for meetings."
+                Recommendation = "Enable with proper retention policies and compliance considerations."
+            }
+            AllowRecordingStorageOutsideRegion = @{
+                Default = $false
+                BestPractice = $false
+                Explanation = "Allows meeting recordings to be stored outside the tenant region."
+                Recommendation = "Disable to maintain data residency compliance."
+            }
+            AllowTranscription = @{
+                Default = $false
+                BestPractice = $true
+                Explanation = "Enables live transcription during meetings for accessibility."
+                Recommendation = "Enable to improve accessibility and meeting documentation."
+            }
+            ScreenSharingMode = @{
+                Default = "EntireScreen"
+                BestPractice = "SingleApplication"
+                Explanation = "Controls the default screen sharing mode in meetings."
+                Recommendation = "Set to 'SingleApplication' to reduce accidental data exposure."
+            }
+            AllowExternalParticipantGiveRequestControl = @{
+                Default = $false
+                BestPractice = $false
+                Explanation = "Allows external participants to give or request control."
+                Recommendation = "Disable to maintain control over shared content with external parties."
+            }
+            AllowWatermarkForCameraVideo = @{
+                Default = $false
+                BestPractice = $true
+                Explanation = "Enables watermarking on video feeds for security."
+                Recommendation = "Enable for sensitive meetings to deter unauthorized recording."
+            }
+            AllowWatermarkForScreenSharing = @{
+                Default = $false
+                BestPractice = $true
+                Explanation = "Enables watermarking on shared screens."
+                Recommendation = "Enable for sensitive content sharing to track potential leaks."
+            }
+            DesignatedPresenterRoleMode = @{
+                Default = "EveryoneUserOverride"
+                BestPractice = "OrganizerOnlyUserOverride"
+                Explanation = "Determines the default presenter role assignment."
+                Recommendation = "Set to 'OrganizerOnlyUserOverride' for better meeting control."
+            }
+        }
+        
+        MessagingPolicies = @{
+            AllowUrlPreviews = @{
+                Default = $true
+                BestPractice = $true
+                Explanation = "Enables URL preview generation when links are shared in messages."
+                Recommendation = "Enable for better user experience with link context."
+            }
+            AllowUserDeleteMessage = @{
+                Default = $true
+                BestPractice = $true
+                Explanation = "Allows users to delete their own messages."
+                Recommendation = "Enable with awareness that audit logs still retain deleted message records."
+            }
+            AllowUserEditMessage = @{
+                Default = $true
+                BestPractice = $true
+                Explanation = "Allows users to edit their sent messages."
+                Recommendation = "Enable for message correction capabilities."
+            }
+            AllowGiphy = @{
+                Default = $true
+                BestPractice = $true
+                Explanation = "Enables Giphy GIF integration in messages."
+                Recommendation = "Enable with content rating restrictions for workplace appropriateness."
+            }
+            GiphyRatingType = @{
+                Default = "Moderate"
+                BestPractice = "Strict"
+                Explanation = "Content rating filter for Giphy GIFs."
+                Recommendation = "Set to 'Strict' to ensure workplace-appropriate content."
+            }
+            AllowPriorityMessages = @{
+                Default = $true
+                BestPractice = $true
+                Explanation = "Enables priority/urgent message notifications."
+                Recommendation = "Enable with user training on appropriate use."
+            }
+            ReadReceiptsEnabledType = @{
+                Default = "UserPreference"
+                BestPractice = "UserPreference"
+                Explanation = "Controls read receipt functionality."
+                Recommendation = "Allow user preference for privacy respect."
+            }
+        }
+        
+        ExternalAccess = @{
+            AllowTeamsConsumer = @{
+                Default = $true
+                BestPractice = $false
+                Explanation = "Allows communication with personal Microsoft accounts (Teams consumer)."
+                Recommendation = "Disable for enterprise security; enable only if business need exists."
+            }
+            AllowTeamsConsumerInbound = @{
+                Default = $true
+                BestPractice = $false
+                Explanation = "Allows inbound communication from Teams consumer accounts."
+                Recommendation = "Disable to prevent unsolicited contact from personal accounts."
+            }
+            AllowPublicUsers = @{
+                Default = $true
+                BestPractice = $false
+                Explanation = "Allows communication with Skype users."
+                Recommendation = "Disable unless Skype interop is required."
+            }
+            AllowFederatedUsers = @{
+                Default = $true
+                BestPractice = $true
+                Explanation = "Allows communication with other Microsoft 365 organizations."
+                Recommendation = "Enable for B2B collaboration; consider allowlist for sensitive organizations."
+            }
+        }
+        
+        GuestAccess = @{
+            AllowGuestAccess = @{
+                Default = $true
+                BestPractice = $true
+                Explanation = "Master switch for guest access to Teams."
+                Recommendation = "Enable with appropriate controls for B2B collaboration."
+            }
+        }
+        
+        AppPolicies = @{
+            DefaultCatalogAppsType = @{
+                Default = "AllowedAppList"
+                BestPractice = "AllowedAppList"
+                Explanation = "Controls which Microsoft apps are available by default."
+                Recommendation = "Use allowlist approach for controlled app deployment."
+            }
+            GlobalCatalogAppsType = @{
+                Default = "AllowedAppList"
+                BestPractice = "AllowedAppList"
+                Explanation = "Controls which third-party apps are available."
+                Recommendation = "Use allowlist approach for security."
+            }
+            AllowSideLoading = @{
+                Default = $true
+                BestPractice = $false
+                Explanation = "Allows users to sideload custom apps."
+                Recommendation = "Disable for security; use proper app deployment channels."
+            }
+            AllowUserPinning = @{
+                Default = $true
+                BestPractice = $true
+                Explanation = "Allows users to pin apps to their Teams client."
+                Recommendation = "Enable for user customization while maintaining default pins."
+            }
+        }
+        
+        EnhancedEncryption = @{
+            AllowEndToEndEncryption = @{
+                Default = "Disabled"
+                BestPractice = "DisabledUserOverride"
+                Explanation = "Controls end-to-end encryption for 1:1 calls."
+                Recommendation = "Enable user override for sensitive communications."
+            }
+        }
+        
+        UpdatePolicies = @{
+            AllowPreview = @{
+                Default = $false
+                BestPractice = $false
+                Explanation = "Allows preview features for users in this policy."
+                Recommendation = "Disable for production users; enable for pilot groups."
+            }
+            UseNewTeamsClient = @{
+                Default = "MicrosoftChoice"
+                BestPractice = "NewTeamsAsDefault"
+                Explanation = "Controls adoption of new Teams client."
+                Recommendation = "Move to new Teams client for performance improvements."
+            }
+        }
+        
+        LiveEventsPolicies = @{
+            AllowBroadcastScheduling = @{
+                Default = $true
+                BestPractice = $true
+                Explanation = "Allows users to schedule live events."
+                Recommendation = "Enable for town halls and large broadcasts."
+            }
+            AllowBroadcastTranscription = @{
+                Default = $false
+                BestPractice = $true
+                Explanation = "Enables transcription for live events."
+                Recommendation = "Enable for accessibility and content capture."
+            }
+            BroadcastRecordingMode = @{
+                Default = "UserOverride"
+                BestPractice = "AlwaysEnabled"
+                Explanation = "Controls live event recording."
+                Recommendation = "Always record for compliance and content retention."
+            }
+        }
+    }
+    
+    return $bestPractices
+}
+#endregion
+
+#region Data Collection Functions
+function Get-TeamsAuditData {
+    <#
+    .SYNOPSIS
+        Collects all Teams and team-related configuration data.
+    .DESCRIPTION
+        Retrieves information about existing teams, their settings, membership counts,
+        and configuration for team creation controls.
+    #>
+    [CmdletBinding()]
+    param()
+    
+    Write-AuditLog -Message "Collecting Teams data..." -Level Header
+    
+    $teamsData = @{
+        AllTeams = @()
+        Statistics = @{}
+        CollectionTime = Get-Date
+        Errors = @()
+    }
+    
+    try {
+        Write-AuditLog -Message "  Retrieving all teams..." -Level Info
+        $allTeams = Get-Team -ErrorAction Stop
+        
+        $totalTeams = $allTeams.Count
+        $currentTeam = 0
+        
+        foreach ($team in $allTeams) {
+            $currentTeam++
+            $percentComplete = [math]::Round(($currentTeam / $totalTeams) * 100)
+            
+            Write-Progress -Activity "Collecting Teams Data" `
+                           -Status "Processing team $currentTeam of $totalTeams" `
+                           -PercentComplete $percentComplete
+            
+            $teamDetails = @{
+                GroupId = $team.GroupId
+                DisplayName = $team.DisplayName
+                Description = $team.Description
+                Visibility = $team.Visibility
+                Archived = $team.Archived
+                MailNickName = $team.MailNickName
+            }
+            
+            $teamsData.AllTeams += $teamDetails
+        }
+        
+        Write-Progress -Activity "Collecting Teams Data" -Completed
+        
+        $teamsData.Statistics = @{
+            TotalTeams = $totalTeams
+            PublicTeams = ($teamsData.AllTeams | Where-Object { $_.Visibility -eq "Public" }).Count
+            PrivateTeams = ($teamsData.AllTeams | Where-Object { $_.Visibility -eq "Private" }).Count
+            ArchivedTeams = ($teamsData.AllTeams | Where-Object { $_.Archived -eq $true }).Count
+            ActiveTeams = ($teamsData.AllTeams | Where-Object { $_.Archived -ne $true }).Count
+        }
+        
+        Write-AuditLog -Message "  Found $totalTeams teams ($($teamsData.Statistics.ActiveTeams) active, $($teamsData.Statistics.ArchivedTeams) archived)" -Level Success
+    }
+    catch {
+        $teamsData.Errors += "Failed to retrieve teams: $($_.Exception.Message)"
+        Write-AuditLog -Message "  Error retrieving teams: $($_.Exception.Message)" -Level Error
+    }
+    
+    return $teamsData
+}
+
+function Get-TeamsSettingsAuditData {
+    <#
+    .SYNOPSIS
+        Collects tenant-wide Teams settings configuration.
+    #>
+    [CmdletBinding()]
+    param()
+    
+    Write-AuditLog -Message "Collecting Teams Settings..." -Level Header
+    
+    $settingsData = @{
+        TenantSettings = @{}
+        ClientConfiguration = @{}
+        CollectionTime = Get-Date
+        Errors = @()
+    }
+    
+    try {
+        Write-AuditLog -Message "  Retrieving Teams client configuration..." -Level Info
+        $clientConfig = Get-CsTeamsClientConfiguration -ErrorAction Stop
+        
+        $settingsData.ClientConfiguration = @{
+            AllowEmailIntoChannel = $clientConfig.AllowEmailIntoChannel
+            RestrictedSenderList = $clientConfig.RestrictedSenderList
+            AllowDropBox = $clientConfig.AllowDropBox
+            AllowBox = $clientConfig.AllowBox
+            AllowGoogleDrive = $clientConfig.AllowGoogleDrive
+            AllowShareFile = $clientConfig.AllowShareFile
+            AllowOrganizationTab = $clientConfig.AllowOrganizationTab
+            AllowSkypeBusinessInterop = $clientConfig.AllowSkypeBusinessInterop
+            AllowResourceAccountSendMessage = $clientConfig.AllowResourceAccountSendMessage
+            AllowGuestUser = $clientConfig.AllowGuestUser
+        }
+        
+        Write-AuditLog -Message "  Teams client configuration retrieved successfully." -Level Success
+    }
+    catch {
+        $settingsData.Errors += "Failed to retrieve client configuration: $($_.Exception.Message)"
+        Write-AuditLog -Message "  Error retrieving client configuration: $($_.Exception.Message)" -Level Error
+    }
+    
+    return $settingsData
+}
+
+function Get-TeamsPoliciesAuditData {
+    <#
+    .SYNOPSIS
+        Collects all Teams policies configuration data.
+    #>
+    [CmdletBinding()]
+    param()
+    
+    Write-AuditLog -Message "Collecting Teams Policies..." -Level Header
+    
+    $policiesData = @{
+        ChannelsPolicies = @()
+        CallingPolicies = @()
+        EmergencyCallingPolicies = @()
+        CollectionTime = Get-Date
+        Errors = @()
+    }
+    
+    try {
+        Write-AuditLog -Message "  Retrieving Teams channels policies..." -Level Info
+        $channelsPolicies = Get-CsTeamsChannelsPolicy -ErrorAction Stop
+        
+        foreach ($policy in $channelsPolicies) {
+            $policiesData.ChannelsPolicies += @{
+                Identity = $policy.Identity
+                Description = $policy.Description
+                AllowOrgWideTeamCreation = $policy.AllowOrgWideTeamCreation
+                EnablePrivateTeamDiscovery = $policy.EnablePrivateTeamDiscovery
+                AllowPrivateChannelCreation = $policy.AllowPrivateChannelCreation
+                AllowSharedChannelCreation = $policy.AllowSharedChannelCreation
+                AllowChannelSharingToExternalUser = $policy.AllowChannelSharingToExternalUser
+                AllowUserToParticipateInExternalSharedChannel = $policy.AllowUserToParticipateInExternalSharedChannel
+            }
+        }
+        
+        Write-AuditLog -Message "  Found $($policiesData.ChannelsPolicies.Count) channels policies." -Level Success
+    }
+    catch {
+        $policiesData.Errors += "Failed to retrieve channels policies: $($_.Exception.Message)"
+        Write-AuditLog -Message "  Error retrieving channels policies: $($_.Exception.Message)" -Level Error
+    }
+    
+    try {
+        Write-AuditLog -Message "  Retrieving Teams calling policies..." -Level Info
+        $callingPolicies = Get-CsTeamsCallingPolicy -ErrorAction Stop
+        
+        foreach ($policy in $callingPolicies) {
+            $policiesData.CallingPolicies += @{
+                Identity = $policy.Identity
+                Description = $policy.Description
+                AllowPrivateCalling = $policy.AllowPrivateCalling
+                AllowVoicemail = $policy.AllowVoicemail
+                AllowCallGroups = $policy.AllowCallGroups
+                AllowDelegation = $policy.AllowDelegation
+                AllowCallForwardingToUser = $policy.AllowCallForwardingToUser
+                AllowCallForwardingToPhone = $policy.AllowCallForwardingToPhone
+                PreventTollBypass = $policy.PreventTollBypass
+                AllowCloudRecordingForCalls = $policy.AllowCloudRecordingForCalls
+                AllowTranscriptionForCalling = $policy.AllowTranscriptionForCalling
+            }
+        }
+        
+        Write-AuditLog -Message "  Found $($policiesData.CallingPolicies.Count) calling policies." -Level Success
+    }
+    catch {
+        $policiesData.Errors += "Failed to retrieve calling policies: $($_.Exception.Message)"
+        Write-AuditLog -Message "  Error retrieving calling policies: $($_.Exception.Message)" -Level Error
+    }
+    
+    return $policiesData
+}
+
+function Get-TeamsUpdatePoliciesAuditData {
+    <#
+    .SYNOPSIS
+        Collects Teams update policies configuration.
+    #>
+    [CmdletBinding()]
+    param()
+    
+    Write-AuditLog -Message "Collecting Teams Update Policies..." -Level Header
+    
+    $updateData = @{
+        UpdatePolicies = @()
+        CollectionTime = Get-Date
+        Errors = @()
+    }
+    
+    try {
+        Write-AuditLog -Message "  Retrieving Teams update policies..." -Level Info
+        $updatePolicies = Get-CsTeamsUpdateManagementPolicy -ErrorAction Stop
+        
+        foreach ($policy in $updatePolicies) {
+            $updateData.UpdatePolicies += @{
+                Identity = $policy.Identity
+                Description = $policy.Description
+                AllowPreview = $policy.AllowPreview
+                AllowPublicPreview = $policy.AllowPublicPreview
+                UpdateDayOfWeek = $policy.UpdateDayOfWeek
+                UpdateTime = $policy.UpdateTime
+                UseNewTeamsClient = $policy.UseNewTeamsClient
+            }
+        }
+        
+        Write-AuditLog -Message "  Found $($updateData.UpdatePolicies.Count) update policies." -Level Success
+    }
+    catch {
+        $updateData.Errors += "Failed to retrieve update policies: $($_.Exception.Message)"
+        Write-AuditLog -Message "  Error retrieving update policies: $($_.Exception.Message)" -Level Error
+    }
+    
+    return $updateData
+}
+
+function Get-TeamsUpgradeSettingsAuditData {
+    <#
+    .SYNOPSIS
+        Collects Teams upgrade configuration and coexistence settings.
+    #>
+    [CmdletBinding()]
+    param()
+    
+    Write-AuditLog -Message "Collecting Teams Upgrade Settings..." -Level Header
+    
+    $upgradeData = @{
+        UpgradeConfiguration = @{}
+        UpgradePolicies = @()
+        CollectionTime = Get-Date
+        Errors = @()
+    }
+    
+    try {
+        Write-AuditLog -Message "  Retrieving Teams upgrade configuration..." -Level Info
+        $upgradeConfig = Get-CsTeamsUpgradeConfiguration -ErrorAction Stop
+        
+        $upgradeData.UpgradeConfiguration = @{
+            DownloadTeams = $upgradeConfig.DownloadTeams
+            SfBMeetingJoinUx = $upgradeConfig.SfBMeetingJoinUx
+        }
+        
+        Write-AuditLog -Message "  Upgrade configuration retrieved successfully." -Level Success
+    }
+    catch {
+        $upgradeData.Errors += "Failed to retrieve upgrade configuration: $($_.Exception.Message)"
+        Write-AuditLog -Message "  Error retrieving upgrade configuration: $($_.Exception.Message)" -Level Warning
+    }
+    
+    try {
+        Write-AuditLog -Message "  Retrieving Teams upgrade policies..." -Level Info
+        $upgradePolicies = Get-CsTeamsUpgradePolicy -ErrorAction Stop
+        
+        foreach ($policy in $upgradePolicies) {
+            $upgradeData.UpgradePolicies += @{
+                Identity = $policy.Identity
+                Description = $policy.Description
+                Mode = $policy.Mode
+                NotifySfbUsers = $policy.NotifySfbUsers
+            }
+        }
+        
+        Write-AuditLog -Message "  Found $($upgradeData.UpgradePolicies.Count) upgrade policies." -Level Success
+    }
+    catch {
+        $upgradeData.Errors += "Failed to retrieve upgrade policies: $($_.Exception.Message)"
+        Write-AuditLog -Message "  Error retrieving upgrade policies: $($_.Exception.Message)" -Level Error
+    }
+    
+    return $upgradeData
+}
+
+function Get-TeamsDevicesAuditData {
+    <#
+    .SYNOPSIS
+        Collects comprehensive Teams devices configuration and inventory data.
+    .DESCRIPTION
+        Retrieves detailed information about all Teams devices including:
+        - Teams Rooms on Windows and Android
+        - Teams Phone Devices (IP Phones, Displays, Panels)
+        - Device Configuration Policies
+        - Shared Device Policies
+        - Device Update Policies
+        - IP Phone Policies
+        - SIP Devices
+        - Surface Hubs
+    #>
+    [CmdletBinding()]
+    param()
+    
+    Write-AuditLog -Message "Collecting Comprehensive Teams Devices Data..." -Level Header
+    
+    $devicesData = @{
+        # Device Inventory
+        TeamsRoomsWindows = @()
+        TeamsRoomsAndroid = @()
+        TeamsPhoneDevices = @()
+        TeamsDisplays = @()
+        TeamsPanels = @()
+        SurfaceHubs = @()
+        SIPDevices = @()
+        CollaborationBars = @()
+        
+        # Device Policies
+        IPPhonePolicies = @()
+        DeviceUpdatePolicies = @()
+        TeamsDevicesConfiguration = @{}
+        SharedCallingPolicies = @()
+        SharedDevicePolicies = @()
+        TeamsRoomsVideoTeleconfPolicies = @()
+        SIPDeviceConfiguration = @()
+        AndroidDeviceUserConfiguration = @()
+        
+        # Device Accounts
+        TeamsRoomAccounts = @()
+        CommonAreaPhoneAccounts = @()
+        
+        # Statistics
+        Statistics = @{}
+        CollectionTime = Get-Date
+        Errors = @()
+    }
+    
+    # Collect IP Phone Policies
+    try {
+        Write-AuditLog -Message "  Retrieving Teams IP phone policies..." -Level Info
+        $ipPhonePolicies = Get-CsTeamsIPPhonePolicy -ErrorAction Stop
+        
+        foreach ($policy in $ipPhonePolicies) {
+            $devicesData.IPPhonePolicies += @{
+                Identity = $policy.Identity
+                Description = $policy.Description
+                SignInMode = $policy.SignInMode
+                SearchOnCommonAreaPhoneMode = $policy.SearchOnCommonAreaPhoneMode
+                AllowHomeScreen = $policy.AllowHomeScreen
+                AllowBetterTogether = $policy.AllowBetterTogether
+                AllowHotDesking = $policy.AllowHotDesking
+                HotDeskingIdleTimeoutInMinutes = $policy.HotDeskingIdleTimeoutInMinutes
+                AllowUserOverrideSettingForHotDesking = $policy.AllowUserOverrideSettingForHotDesking
+            }
+        }
+        
+        Write-AuditLog -Message "  Found $($devicesData.IPPhonePolicies.Count) IP phone policies." -Level Success
+    }
+    catch {
+        $devicesData.Errors += "Failed to retrieve IP phone policies: $($_.Exception.Message)"
+        Write-AuditLog -Message "  Error retrieving IP phone policies: $($_.Exception.Message)" -Level Warning
+    }
+    
+    # Collect Device Update Policies (Teams Admin Center device update policies)
+    try {
+        Write-AuditLog -Message "  Retrieving device update policies..." -Level Info
+        $deviceUpdatePolicies = Get-CsTeamsDeviceManagementPolicy -ErrorAction SilentlyContinue
+        
+        if ($deviceUpdatePolicies) {
+            foreach ($policy in $deviceUpdatePolicies) {
+                $devicesData.DeviceUpdatePolicies += @{
+                    Identity = $policy.Identity
+                    Description = $policy.Description
+                }
+            }
+            Write-AuditLog -Message "  Found $($devicesData.DeviceUpdatePolicies.Count) device management policies." -Level Success
+        }
+    }
+    catch {
+        Write-AuditLog -Message "  Note: Device management policies not available or accessible." -Level Warning
+    }
+    
+    # Collect Shared Calling Routing Policies
+    try {
+        Write-AuditLog -Message "  Retrieving shared calling routing policies..." -Level Info
+        $sharedCallingPolicies = Get-CsTeamsSharedCallingRoutingPolicy -ErrorAction SilentlyContinue
+        
+        if ($sharedCallingPolicies) {
+            foreach ($policy in $sharedCallingPolicies) {
+                $devicesData.SharedCallingPolicies += @{
+                    Identity = $policy.Identity
+                    Description = $policy.Description
+                    ResourceAccount = $policy.ResourceAccount
+                    EmergencyNumbers = $policy.EmergencyNumbers
+                }
+            }
+            Write-AuditLog -Message "  Found $($devicesData.SharedCallingPolicies.Count) shared calling policies." -Level Success
+        }
+    }
+    catch {
+        Write-AuditLog -Message "  Note: Shared calling routing policies not available." -Level Warning
+    }
+    
+    # Collect Teams Rooms Video Teleconference Device Policies
+    try {
+        Write-AuditLog -Message "  Retrieving Teams Rooms video teleconf device policies..." -Level Info
+        $videoTeleconfPolicies = Get-CsTeamsRoomVideoTeleConferencingPolicy -ErrorAction SilentlyContinue
+        
+        if ($videoTeleconfPolicies) {
+            foreach ($policy in $videoTeleconfPolicies) {
+                $devicesData.TeamsRoomsVideoTeleconfPolicies += @{
+                    Identity = $policy.Identity
+                    Description = $policy.Description
+                }
+            }
+            Write-AuditLog -Message "  Found $($devicesData.TeamsRoomsVideoTeleconfPolicies.Count) video teleconf policies." -Level Success
+        }
+    }
+    catch {
+        Write-AuditLog -Message "  Note: Teams Rooms video teleconference policies not available." -Level Warning
+    }
+    
+    # Collect SIP Device Configuration
+    try {
+        Write-AuditLog -Message "  Retrieving SIP device configuration..." -Level Info
+        $sipConfig = Get-CsTeamsSipDevicesConfiguration -ErrorAction SilentlyContinue
+        
+        if ($sipConfig) {
+            $devicesData.SIPDeviceConfiguration += @{
+                Identity = $sipConfig.Identity
+                BulkSignInEnabled = $sipConfig.BulkSignInEnabled
+            }
+            Write-AuditLog -Message "  SIP device configuration retrieved." -Level Success
+        }
+    }
+    catch {
+        Write-AuditLog -Message "  Note: SIP device configuration not available." -Level Warning
+    }
+    
+    # Collect Online SIP Domains for SIP devices
+    try {
+        Write-AuditLog -Message "  Retrieving online SIP domains..." -Level Info
+        $sipDomains = Get-CsOnlineSipDomain -ErrorAction SilentlyContinue
+        
+        if ($sipDomains) {
+            foreach ($domain in $sipDomains) {
+                $devicesData.SIPDevices += @{
+                    Name = $domain.Name
+                    Status = $domain.Status
+                }
+            }
+            Write-AuditLog -Message "  Found $($devicesData.SIPDevices.Count) SIP domains." -Level Success
+        }
+    }
+    catch {
+        Write-AuditLog -Message "  Note: Could not retrieve SIP domains." -Level Warning
+    }
+    
+    # Collect Teams Android Device User Configuration
+    try {
+        Write-AuditLog -Message "  Retrieving Android device user configuration..." -Level Info
+        $androidConfig = Get-CsTeamsAndroidDevicesUserConfiguration -ErrorAction SilentlyContinue
+        
+        if ($androidConfig) {
+            foreach ($config in $androidConfig) {
+                $devicesData.AndroidDeviceUserConfiguration += @{
+                    Identity = $config.Identity
+                }
+            }
+            Write-AuditLog -Message "  Android device configuration retrieved." -Level Success
+        }
+    }
+    catch {
+        Write-AuditLog -Message "  Note: Android device user configuration not available." -Level Warning
+    }
+    
+    # Collect Teams Room Accounts (resource accounts configured as meeting rooms)
+    try {
+        Write-AuditLog -Message "  Retrieving Teams Room resource accounts..." -Level Info
+        
+        # Get all Teams-enabled users and filter for room accounts
+        $onlineUsers = Get-CsOnlineUser -Filter "AccountType -eq 'ResourceAccount'" -ErrorAction SilentlyContinue
+        
+        if ($onlineUsers) {
+            foreach ($user in $onlineUsers) {
+                if ($user.InterpretedUserType -like "*Room*" -or $user.InterpretedUserType -like "*MeetingRoom*") {
+                    $devicesData.TeamsRoomAccounts += @{
+                        DisplayName = $user.DisplayName
+                        UserPrincipalName = $user.UserPrincipalName
+                        SipAddress = $user.SipAddress
+                        AccountType = $user.AccountType
+                        InterpretedUserType = $user.InterpretedUserType
+                        TeamsUpgradeEffectiveMode = $user.TeamsUpgradeEffectiveMode
+                        AssignedLicenses = $user.AssignedPlan
+                        HostingProvider = $user.HostingProvider
+                    }
+                }
+                elseif ($user.InterpretedUserType -like "*CommonArea*") {
+                    $devicesData.CommonAreaPhoneAccounts += @{
+                        DisplayName = $user.DisplayName
+                        UserPrincipalName = $user.UserPrincipalName
+                        SipAddress = $user.SipAddress
+                        AccountType = $user.AccountType
+                        InterpretedUserType = $user.InterpretedUserType
+                        LineUri = $user.LineUri
+                        TeamsUpgradeEffectiveMode = $user.TeamsUpgradeEffectiveMode
+                    }
+                }
+            }
+            
+            Write-AuditLog -Message "  Found $($devicesData.TeamsRoomAccounts.Count) Teams Room accounts." -Level Success
+            Write-AuditLog -Message "  Found $($devicesData.CommonAreaPhoneAccounts.Count) Common Area Phone accounts." -Level Success
+        }
+    }
+    catch {
+        $devicesData.Errors += "Failed to retrieve resource accounts: $($_.Exception.Message)"
+        Write-AuditLog -Message "  Error retrieving resource accounts: $($_.Exception.Message)" -Level Warning
+    }
+    
+    # Try to get device inventory via TAC API (if available through Graph)
+    try {
+        Write-AuditLog -Message "  Attempting to retrieve device inventory via Graph API..." -Level Info
+        
+        # Get Teams devices from Graph API
+        $teamsDevices = Get-MgTeamworkDevice -All -ErrorAction SilentlyContinue
+        
+        if ($teamsDevices) {
+            foreach ($device in $teamsDevices) {
+                $deviceInfo = @{
+                    Id = $device.Id
+                    DeviceType = $device.DeviceType
+                    HardwareDetails = $device.HardwareDetail
+                    Notes = $device.Notes
+                    HealthStatus = $device.HealthStatus
+                    CompanyAssetTag = $device.CompanyAssetTag
+                    ActivityState = $device.ActivityState
+                    CurrentUser = $device.CurrentUser
+                }
+                
+                # Categorize by device type
+                switch ($device.DeviceType) {
+                    "teamsRoom" {
+                        # Further categorize by OS if available
+                        if ($device.HardwareDetail.OperatingSystem -like "*Windows*") {
+                            $devicesData.TeamsRoomsWindows += $deviceInfo
+                        }
+                        elseif ($device.HardwareDetail.OperatingSystem -like "*Android*") {
+                            $devicesData.TeamsRoomsAndroid += $deviceInfo
+                        }
+                        else {
+                            $devicesData.TeamsRoomsWindows += $deviceInfo
+                        }
+                    }
+                    "collaborationBar" {
+                        $devicesData.CollaborationBars += $deviceInfo
+                    }
+                    "teamsDisplay" {
+                        $devicesData.TeamsDisplays += $deviceInfo
+                    }
+                    "teamsPanel" {
+                        $devicesData.TeamsPanels += $deviceInfo
+                    }
+                    "teamsPhone" {
+                        $devicesData.TeamsPhoneDevices += $deviceInfo
+                    }
+                    "surfaceHub" {
+                        $devicesData.SurfaceHubs += $deviceInfo
+                    }
+                    "sipAnalogDevice" {
+                        $devicesData.SIPDevices += $deviceInfo
+                    }
+                    default {
+                        $devicesData.TeamsPhoneDevices += $deviceInfo
+                    }
+                }
+            }
+            
+            Write-AuditLog -Message "  Device inventory retrieved via Graph API." -Level Success
+        }
+    }
+    catch {
+        Write-AuditLog -Message "  Note: Graph API device inventory not available. Using policy-based audit." -Level Warning
+    }
+    
+    # Calculate device statistics
+    $devicesData.Statistics = @{
+        TotalTeamsRoomsWindows = $devicesData.TeamsRoomsWindows.Count
+        TotalTeamsRoomsAndroid = $devicesData.TeamsRoomsAndroid.Count
+        TotalTeamsPhoneDevices = $devicesData.TeamsPhoneDevices.Count
+        TotalTeamsDisplays = $devicesData.TeamsDisplays.Count
+        TotalTeamsPanels = $devicesData.TeamsPanels.Count
+        TotalSurfaceHubs = $devicesData.SurfaceHubs.Count
+        TotalCollaborationBars = $devicesData.CollaborationBars.Count
+        TotalSIPDevices = $devicesData.SIPDevices.Count
+        TotalTeamsRoomAccounts = $devicesData.TeamsRoomAccounts.Count
+        TotalCommonAreaPhoneAccounts = $devicesData.CommonAreaPhoneAccounts.Count
+        TotalIPPhonePolicies = $devicesData.IPPhonePolicies.Count
+        TotalSharedCallingPolicies = $devicesData.SharedCallingPolicies.Count
+    }
+    
+    Write-AuditLog -Message "  Device Statistics Summary:" -Level Info
+    Write-AuditLog -Message "    Teams Rooms (Windows): $($devicesData.Statistics.TotalTeamsRoomsWindows)" -Level Info
+    Write-AuditLog -Message "    Teams Rooms (Android): $($devicesData.Statistics.TotalTeamsRoomsAndroid)" -Level Info
+    Write-AuditLog -Message "    Teams Phone Devices: $($devicesData.Statistics.TotalTeamsPhoneDevices)" -Level Info
+    Write-AuditLog -Message "    Teams Displays: $($devicesData.Statistics.TotalTeamsDisplays)" -Level Info
+    Write-AuditLog -Message "    Teams Panels: $($devicesData.Statistics.TotalTeamsPanels)" -Level Info
+    Write-AuditLog -Message "    Surface Hubs: $($devicesData.Statistics.TotalSurfaceHubs)" -Level Info
+    Write-AuditLog -Message "    Teams Room Accounts: $($devicesData.Statistics.TotalTeamsRoomAccounts)" -Level Info
+    Write-AuditLog -Message "    Common Area Phones: $($devicesData.Statistics.TotalCommonAreaPhoneAccounts)" -Level Info
+    Write-AuditLog -Message "    IP Phone Policies: $($devicesData.Statistics.TotalIPPhonePolicies)" -Level Success
+    
+    return $devicesData
+}
+
+function Get-TeamsAppManagementAuditData {
+    <#
+    .SYNOPSIS
+        Collects all Teams app management configuration data.
+    .DESCRIPTION
+        Retrieves org-wide app settings, app catalog, permission policies,
+        setup policies. Automatically detects if tenant uses Unified App Management
+        and uses appropriate cmdlets accordingly.
+    #>
+    [CmdletBinding()]
+    param()
+    
+    Write-AuditLog -Message "Collecting Teams App Management Data..." -Level Header
+    
+    $appData = @{
+        OrgWideSettings = @{}
+        AppCatalog = @()
+        PermissionPolicies = @()
+        SetupPolicies = @()
+        UnifiedAppManagement = $false
+        CollectionTime = Get-Date
+        Errors = @()
+    }
+    
+    # Check if tenant has been moved to Unified App Management
+    try {
+        Write-AuditLog -Message "  Checking for Unified App Management..." -Level Info
+        
+        # Try to detect Unified App Management by checking tenant app settings
+        $tenantAppSettings = Get-CsTeamsAppPermissionConfiguration -ErrorAction Stop
+        
+        # Check if the tenant is using the new unified management
+        # The presence of certain properties or the behavior of cmdlets indicates unified management
+        if ($null -ne $tenantAppSettings) {
+            # Check for indicators of unified app management
+            $isUnified = $false
+            
+            # Try the new unified cmdlet - if it works, tenant is on unified management
+            try {
+                $unifiedCheck = Get-CsTeamsSettingsCustomApp -ErrorAction SilentlyContinue
+                if ($null -ne $unifiedCheck) {
+                    $isUnified = $true
+                }
+            }
+            catch {
+                # Cmdlet not available or failed - likely not on unified management
+                $isUnified = $false
+            }
+            
+            $appData.UnifiedAppManagement = $isUnified
+            
+            if ($isUnified) {
+                Write-AuditLog -Message "  Tenant is using Unified App Management." -Level Info
+            }
+            else {
+                Write-AuditLog -Message "  Tenant is using classic app management." -Level Info
+            }
+        }
+    }
+    catch {
+        Write-AuditLog -Message "  Could not determine app management mode: $($_.Exception.Message)" -Level Warning
+    }
+    
+    # Collect Org-Wide App Settings
+    try {
+        Write-AuditLog -Message "  Retrieving org-wide app settings..." -Level Info
+        
+        if ($appData.UnifiedAppManagement) {
+            # Use unified app management cmdlets
+            try {
+                $customAppSettings = Get-CsTeamsSettingsCustomApp -ErrorAction SilentlyContinue
+                $appData.OrgWideSettings.CustomAppSettings = @{
+                    IsSideloadedAppsInteractionEnabled = $customAppSettings.IsSideloadedAppsInteractionEnabled
+                }
+            }
+            catch {
+                Write-AuditLog -Message "  Note: Could not retrieve custom app settings." -Level Warning
+            }
+        }
+        
+        # Classic app permission configuration (works for both modes)
+        $appSettings = Get-CsTeamsAppPermissionConfiguration -ErrorAction Stop
+        
+        $appData.OrgWideSettings = @{
+            DefaultCatalogAppsType = $appSettings.DefaultCatalogAppsType
+            GlobalCatalogAppsType = $appSettings.GlobalCatalogAppsType
+            PrivateCatalogAppsType = $appSettings.PrivateCatalogAppsType
+            IsUnifiedAppManagement = $appData.UnifiedAppManagement
+        }
+        
+        Write-AuditLog -Message "  Org-wide app settings retrieved successfully." -Level Success
+    }
+    catch {
+        $appData.Errors += "Failed to retrieve org-wide app settings: $($_.Exception.Message)"
+        Write-AuditLog -Message "  Error retrieving org-wide app settings: $($_.Exception.Message)" -Level Error
+    }
+    
+    # Collect App Catalog
+    try {
+        Write-AuditLog -Message "  Retrieving Teams app catalog..." -Level Info
+        $appCatalog = Get-TeamsApp -ErrorAction Stop
+        
+        foreach ($app in $appCatalog) {
+            $appData.AppCatalog += @{
+                Id = $app.Id
+                ExternalId = $app.ExternalId
+                DisplayName = $app.DisplayName
+                DistributionMethod = $app.DistributionMethod
+            }
+        }
+        
+        Write-AuditLog -Message "  Found $($appData.AppCatalog.Count) apps in catalog." -Level Success
+    }
+    catch {
+        $appData.Errors += "Failed to retrieve app catalog: $($_.Exception.Message)"
+        Write-AuditLog -Message "  Error retrieving app catalog: $($_.Exception.Message)" -Level Warning
+    }
+    
+    # Collect App Permission Policies
+    try {
+        Write-AuditLog -Message "  Retrieving app permission policies..." -Level Info
+        $permissionPolicies = Get-CsTeamsAppPermissionPolicy -ErrorAction Stop
+        
+        foreach ($policy in $permissionPolicies) {
+            $appData.PermissionPolicies += @{
+                Identity = $policy.Identity
+                Description = $policy.Description
+                DefaultCatalogAppsType = $policy.DefaultCatalogAppsType
+                GlobalCatalogAppsType = $policy.GlobalCatalogAppsType
+                PrivateCatalogAppsType = $policy.PrivateCatalogAppsType
+            }
+        }
+        
+        Write-AuditLog -Message "  Found $($appData.PermissionPolicies.Count) app permission policies." -Level Success
+    }
+    catch {
+        $appData.Errors += "Failed to retrieve app permission policies: $($_.Exception.Message)"
+        Write-AuditLog -Message "  Error retrieving app permission policies: $($_.Exception.Message)" -Level Error
+    }
+    
+    # Collect App Setup Policies
+    try {
+        Write-AuditLog -Message "  Retrieving app setup policies..." -Level Info
+        $setupPolicies = Get-CsTeamsAppSetupPolicy -ErrorAction Stop
+        
+        foreach ($policy in $setupPolicies) {
+            $appData.SetupPolicies += @{
+                Identity = $policy.Identity
+                Description = $policy.Description
+                AllowUserPinning = $policy.AllowUserPinning
+                AllowSideLoading = $policy.AllowSideLoading
+                PinnedAppBarApps = $policy.PinnedAppBarApps
+                PinnedMessageBarApps = $policy.PinnedMessageBarApps
+            }
+        }
+        
+        Write-AuditLog -Message "  Found $($appData.SetupPolicies.Count) app setup policies." -Level Success
+    }
+    catch {
+        $appData.Errors += "Failed to retrieve app setup policies: $($_.Exception.Message)"
+        Write-AuditLog -Message "  Error retrieving app setup policies: $($_.Exception.Message)" -Level Error
+    }
+    
+    return $appData
+}
+
+function Get-TeamsMeetingsAuditData {
+    <#
+    .SYNOPSIS
+        Collects all Teams meetings configuration data.
+    #>
+    [CmdletBinding()]
+    param()
+    
+    Write-AuditLog -Message "Collecting Teams Meetings Data..." -Level Header
+    
+    $meetingsData = @{
+        ConferenceBridge = @{}
+        AudioConferencingPolicies = @()
+        MeetingPolicies = @()
+        MeetingConfiguration = @{}
+        CustomizationPolicies = @()
+        LiveEventPolicies = @()
+        EventsPolicies = @()
+        CollectionTime = Get-Date
+        Errors = @()
+    }
+    
+    try {
+        Write-AuditLog -Message "  Retrieving audio conferencing policies..." -Level Info
+        $audioConfPolicies = Get-CsTeamsAudioConferencingPolicy -ErrorAction Stop
+        
+        foreach ($policy in $audioConfPolicies) {
+            $meetingsData.AudioConferencingPolicies += @{
+                Identity = $policy.Identity
+                AllowTollFreeDialin = $policy.AllowTollFreeDialin
+                MeetingInvitePhoneNumbers = $policy.MeetingInvitePhoneNumbers
+            }
+        }
+        
+        Write-AuditLog -Message "  Found $($meetingsData.AudioConferencingPolicies.Count) audio conferencing policies." -Level Success
+    }
+    catch {
+        $meetingsData.Errors += "Failed to retrieve audio conferencing policies: $($_.Exception.Message)"
+        Write-AuditLog -Message "  Error retrieving audio conferencing policies: $($_.Exception.Message)" -Level Warning
+    }
+    
+    try {
+        Write-AuditLog -Message "  Retrieving meeting policies..." -Level Info
+        $meetingPolicies = Get-CsTeamsMeetingPolicy -ErrorAction Stop
+        
+        foreach ($policy in $meetingPolicies) {
+            $meetingsData.MeetingPolicies += @{
+                Identity = $policy.Identity
+                Description = $policy.Description
+                AllowAnonymousUsersToJoinMeeting = $policy.AllowAnonymousUsersToJoinMeeting
+                AllowAnonymousUsersToStartMeeting = $policy.AllowAnonymousUsersToStartMeeting
+                AutoAdmittedUsers = $policy.AutoAdmittedUsers
+                AllowPSTNUsersToBypassLobby = $policy.AllowPSTNUsersToBypassLobby
+                AllowCloudRecording = $policy.AllowCloudRecording
+                AllowRecordingStorageOutsideRegion = $policy.AllowRecordingStorageOutsideRegion
+                AllowTranscription = $policy.AllowTranscription
+                LiveCaptionsEnabledType = $policy.LiveCaptionsEnabledType
+                AllowMeetNow = $policy.AllowMeetNow
+                AllowIPVideo = $policy.AllowIPVideo
+                MediaBitRateKb = $policy.MediaBitRateKb
+                ScreenSharingMode = $policy.ScreenSharingMode
+                AllowParticipantGiveRequestControl = $policy.AllowParticipantGiveRequestControl
+                AllowExternalParticipantGiveRequestControl = $policy.AllowExternalParticipantGiveRequestControl
+                AllowPowerPointSharing = $policy.AllowPowerPointSharing
+                AllowWhiteboard = $policy.AllowWhiteboard
+                AllowMeetingReactions = $policy.AllowMeetingReactions
+                AllowBreakoutRooms = $policy.AllowBreakoutRooms
+                AllowWatermarkForCameraVideo = $policy.AllowWatermarkForCameraVideo
+                AllowWatermarkForScreenSharing = $policy.AllowWatermarkForScreenSharing
+                DesignatedPresenterRoleMode = $policy.DesignatedPresenterRoleMode
+                NewMeetingRecordingExpirationDays = $policy.NewMeetingRecordingExpirationDays
+                MeetingChatEnabledType = $policy.MeetingChatEnabledType
+            }
+        }
+        
+        Write-AuditLog -Message "  Found $($meetingsData.MeetingPolicies.Count) meeting policies." -Level Success
+    }
+    catch {
+        $meetingsData.Errors += "Failed to retrieve meeting policies: $($_.Exception.Message)"
+        Write-AuditLog -Message "  Error retrieving meeting policies: $($_.Exception.Message)" -Level Error
+    }
+    
+    try {
+        Write-AuditLog -Message "  Retrieving meeting configuration..." -Level Info
+        $meetingConfig = Get-CsTeamsMeetingConfiguration -ErrorAction Stop
+        
+        $meetingsData.MeetingConfiguration = @{
+            LogoURL = $meetingConfig.LogoURL
+            LegalURL = $meetingConfig.LegalURL
+            HelpURL = $meetingConfig.HelpURL
+            CustomFooterText = $meetingConfig.CustomFooterText
+            DisableAnonymousJoin = $meetingConfig.DisableAnonymousJoin
+            EnableQoS = $meetingConfig.EnableQoS
+            ClientMediaPortRangeEnabled = $meetingConfig.ClientMediaPortRangeEnabled
+        }
+        
+        Write-AuditLog -Message "  Meeting configuration retrieved successfully." -Level Success
+    }
+    catch {
+        $meetingsData.Errors += "Failed to retrieve meeting configuration: $($_.Exception.Message)"
+        Write-AuditLog -Message "  Error retrieving meeting configuration: $($_.Exception.Message)" -Level Error
+    }
+    
+    try {
+        Write-AuditLog -Message "  Retrieving live event policies..." -Level Info
+        $liveEventPolicies = Get-CsTeamsMeetingBroadcastPolicy -ErrorAction Stop
+        
+        foreach ($policy in $liveEventPolicies) {
+            $meetingsData.LiveEventPolicies += @{
+                Identity = $policy.Identity
+                Description = $policy.Description
+                AllowBroadcastScheduling = $policy.AllowBroadcastScheduling
+                AllowBroadcastTranscription = $policy.AllowBroadcastTranscription
+                BroadcastAttendeeVisibilityMode = $policy.BroadcastAttendeeVisibilityMode
+                BroadcastRecordingMode = $policy.BroadcastRecordingMode
+            }
+        }
+        
+        Write-AuditLog -Message "  Found $($meetingsData.LiveEventPolicies.Count) live event policies." -Level Success
+    }
+    catch {
+        $meetingsData.Errors += "Failed to retrieve live event policies: $($_.Exception.Message)"
+        Write-AuditLog -Message "  Error retrieving live event policies: $($_.Exception.Message)" -Level Error
+    }
+    
+    try {
+        Write-AuditLog -Message "  Retrieving events policies..." -Level Info
+        $eventsPolicies = Get-CsTeamsEventsPolicy -ErrorAction Stop
+        
+        foreach ($policy in $eventsPolicies) {
+            $meetingsData.EventsPolicies += @{
+                Identity = $policy.Identity
+                Description = $policy.Description
+                AllowWebinars = $policy.AllowWebinars
+                AllowTownhalls = $policy.AllowTownhalls
+                TownhallChatExperience = $policy.TownhallChatExperience
+            }
+        }
+        
+        Write-AuditLog -Message "  Found $($meetingsData.EventsPolicies.Count) events policies." -Level Success
+    }
+    catch {
+        $meetingsData.Errors += "Failed to retrieve events policies: $($_.Exception.Message)"
+        Write-AuditLog -Message "  Error retrieving events policies: $($_.Exception.Message)" -Level Warning
+    }
+    
+    return $meetingsData
+}
+
+function Get-TeamsMessagingAuditData {
+    <#
+    .SYNOPSIS
+        Collects all Teams messaging policies configuration.
+    #>
+    [CmdletBinding()]
+    param()
+    
+    Write-AuditLog -Message "Collecting Teams Messaging Policies..." -Level Header
+    
+    $messagingData = @{
+        MessagingPolicies = @()
+        CollectionTime = Get-Date
+        Errors = @()
+    }
+    
+    try {
+        Write-AuditLog -Message "  Retrieving messaging policies..." -Level Info
+        $messagingPolicies = Get-CsTeamsMessagingPolicy -ErrorAction Stop
+        
+        foreach ($policy in $messagingPolicies) {
+            $messagingData.MessagingPolicies += @{
+                Identity = $policy.Identity
+                Description = $policy.Description
+                AllowUrlPreviews = $policy.AllowUrlPreviews
+                AllowOwnerDeleteMessage = $policy.AllowOwnerDeleteMessage
+                AllowUserDeleteMessage = $policy.AllowUserDeleteMessage
+                AllowUserEditMessage = $policy.AllowUserEditMessage
+                AllowUserDeleteChat = $policy.AllowUserDeleteChat
+                AllowUserChat = $policy.AllowUserChat
+                AllowGiphy = $policy.AllowGiphy
+                GiphyRatingType = $policy.GiphyRatingType
+                AllowMemes = $policy.AllowMemes
+                AllowStickers = $policy.AllowStickers
+                AllowImmersiveReader = $policy.AllowImmersiveReader
+                AllowUserTranslation = $policy.AllowUserTranslation
+                ReadReceiptsEnabledType = $policy.ReadReceiptsEnabledType
+                AllowPriorityMessages = $policy.AllowPriorityMessages
+                AllowRemoveUser = $policy.AllowRemoveUser
+                AllowSmartReply = $policy.AllowSmartReply
+                AllowSmartCompose = $policy.AllowSmartCompose
+                ChannelsInChatListEnabledType = $policy.ChannelsInChatListEnabledType
+                AudioMessageEnabledType = $policy.AudioMessageEnabledType
+                AllowVideoMessages = $policy.AllowVideoMessages
+            }
+        }
+        
+        Write-AuditLog -Message "  Found $($messagingData.MessagingPolicies.Count) messaging policies." -Level Success
+    }
+    catch {
+        $messagingData.Errors += "Failed to retrieve messaging policies: $($_.Exception.Message)"
+        Write-AuditLog -Message "  Error retrieving messaging policies: $($_.Exception.Message)" -Level Error
+    }
+    
+    return $messagingData
+}
+
+function Get-TeamsEncryptionAuditData {
+    <#
+    .SYNOPSIS
+        Collects enhanced encryption policies configuration.
+    #>
+    [CmdletBinding()]
+    param()
+    
+    Write-AuditLog -Message "Collecting Enhanced Encryption Policies..." -Level Header
+    
+    $encryptionData = @{
+        EncryptionPolicies = @()
+        CollectionTime = Get-Date
+        Errors = @()
+    }
+    
+    try {
+        Write-AuditLog -Message "  Retrieving enhanced encryption policies..." -Level Info
+        $encryptionPolicies = Get-CsTeamsEnhancedEncryptionPolicy -ErrorAction Stop
+        
+        foreach ($policy in $encryptionPolicies) {
+            $encryptionData.EncryptionPolicies += @{
+                Identity = $policy.Identity
+                Description = $policy.Description
+                CallingEndToEndEncryptionEnabledType = $policy.CallingEndToEndEncryptionEnabledType
+                MeetingEndToEndEncryption = $policy.MeetingEndToEndEncryption
+            }
+        }
+        
+        Write-AuditLog -Message "  Found $($encryptionData.EncryptionPolicies.Count) enhanced encryption policies." -Level Success
+    }
+    catch {
+        $encryptionData.Errors += "Failed to retrieve enhanced encryption policies: $($_.Exception.Message)"
+        Write-AuditLog -Message "  Error retrieving enhanced encryption policies: $($_.Exception.Message)" -Level Error
+    }
+    
+    return $encryptionData
+}
+
+function Get-TeamsPhoneAuditData {
+    <#
+    .SYNOPSIS
+        Collects comprehensive Teams Phone (Voice) configuration data.
+    .DESCRIPTION
+        Retrieves all Teams Phone related settings including:
+        - Voice routing policies and configurations
+        - Dial plans (tenant and user)
+        - PSTN usage records
+        - Voice routes
+        - Online voice routing policies
+        - Calling policies
+        - Call park policies
+        - Call queues and Auto attendants
+        - Emergency calling and routing policies
+        - Caller ID policies
+        - Voicemail policies
+        - Phone number assignments
+        - Direct Routing configuration
+        - Operator Connect settings
+        - Teams Phone Mobile policies
+        - Mobility policies
+        - Network topology and sites
+        - Location-based routing
+    #>
+    [CmdletBinding()]
+    param()
+    
+    Write-AuditLog -Message "Collecting Teams Phone (Voice) Configuration Data..." -Level Header
+    
+    $phoneData = @{
+        # Voice Routing
+        OnlineVoiceRoutingPolicies = @()
+        OnlineVoiceRoutes = @()
+        OnlinePSTNUsages = @()
+        TenantDialPlans = @()
+        
+        # Calling Features
+        CallingPolicies = @()
+        CallParkPolicies = @()
+        CallerIDPolicies = @()
+        CallHoldPolicies = @()
+        
+        # Queues and Attendants
+        CallQueues = @()
+        AutoAttendants = @()
+        ResourceAccounts = @()
+        
+        # Emergency Services
+        EmergencyCallingPolicies = @()
+        EmergencyCallRoutingPolicies = @()
+        NetworkSites = @()
+        NetworkSubnets = @()
+        TrustedIPs = @()
+        EmergencyAddresses = @()
+        
+        # Voicemail
+        VoicemailPolicies = @()
+        
+        # Phone Numbers
+        PhoneNumbers = @()
+        PhoneNumberAssignments = @()
+        UnassignedNumbers = @()
+        
+        # Direct Routing
+        OnlinePSTNGateways = @()
+        TrunkTranslationRules = @()
+        SBCConfiguration = @()
+        
+        # Operator Connect
+        OperatorConnectConfiguration = @{}
+        
+        # Mobility and Survivable Branch
+        MobilityPolicies = @()
+        SurvivableBranchAppliances = @()
+        SurvivableBranchAppliancePolicies = @()
+        
+        # Location Based Routing
+        NetworkConfiguration = @{}
+        LocationBasedRoutingEnabled = $false
+        
+        # Compliance Recording
+        ComplianceRecordingPolicies = @()
+        ComplianceRecordingApplications = @()
+        
+        # Statistics
+        Statistics = @{}
+        CollectionTime = Get-Date
+        Errors = @()
+    }
+    
+    # Collect Online Voice Routing Policies
+    try {
+        Write-AuditLog -Message "  Retrieving online voice routing policies..." -Level Info
+        $voiceRoutingPolicies = Get-CsOnlineVoiceRoutingPolicy -ErrorAction Stop
+        
+        foreach ($policy in $voiceRoutingPolicies) {
+            $phoneData.OnlineVoiceRoutingPolicies += @{
+                Identity = $policy.Identity
+                Description = $policy.Description
+                OnlinePstnUsages = $policy.OnlinePstnUsages
+                RouteType = $policy.RouteType
+            }
+        }
+        
+        Write-AuditLog -Message "  Found $($phoneData.OnlineVoiceRoutingPolicies.Count) voice routing policies." -Level Success
+    }
+    catch {
+        $phoneData.Errors += "Failed to retrieve voice routing policies: $($_.Exception.Message)"
+        Write-AuditLog -Message "  Error retrieving voice routing policies: $($_.Exception.Message)" -Level Warning
+    }
+    
+    # Collect Online Voice Routes
+    try {
+        Write-AuditLog -Message "  Retrieving online voice routes..." -Level Info
+        $voiceRoutes = Get-CsOnlineVoiceRoute -ErrorAction Stop
+        
+        foreach ($route in $voiceRoutes) {
+            $phoneData.OnlineVoiceRoutes += @{
+                Identity = $route.Identity
+                Description = $route.Description
+                NumberPattern = $route.NumberPattern
+                OnlinePstnUsages = $route.OnlinePstnUsages
+                OnlinePstnGatewayList = $route.OnlinePstnGatewayList
+                Priority = $route.Priority
+                BridgeSourcePhoneNumber = $route.BridgeSourcePhoneNumber
+            }
+        }
+        
+        Write-AuditLog -Message "  Found $($phoneData.OnlineVoiceRoutes.Count) voice routes." -Level Success
+    }
+    catch {
+        $phoneData.Errors += "Failed to retrieve voice routes: $($_.Exception.Message)"
+        Write-AuditLog -Message "  Error retrieving voice routes: $($_.Exception.Message)" -Level Warning
+    }
+    
+    # Collect Online PSTN Usages
+    try {
+        Write-AuditLog -Message "  Retrieving online PSTN usages..." -Level Info
+        $pstnUsages = Get-CsOnlinePstnUsage -ErrorAction Stop
+        
+        if ($pstnUsages -and $pstnUsages.Usage) {
+            $phoneData.OnlinePSTNUsages = $pstnUsages.Usage
+        }
+        
+        Write-AuditLog -Message "  Found $($phoneData.OnlinePSTNUsages.Count) PSTN usages." -Level Success
+    }
+    catch {
+        $phoneData.Errors += "Failed to retrieve PSTN usages: $($_.Exception.Message)"
+        Write-AuditLog -Message "  Error retrieving PSTN usages: $($_.Exception.Message)" -Level Warning
+    }
+    
+    # Collect Tenant Dial Plans
+    try {
+        Write-AuditLog -Message "  Retrieving tenant dial plans..." -Level Info
+        $dialPlans = Get-CsTenantDialPlan -ErrorAction Stop
+        
+        foreach ($plan in $dialPlans) {
+            $phoneData.TenantDialPlans += @{
+                Identity = $plan.Identity
+                Description = $plan.Description
+                SimpleName = $plan.SimpleName
+                NormalizationRules = $plan.NormalizationRules
+                ExternalAccessPrefix = $plan.ExternalAccessPrefix
+                OptimizeDeviceDialing = $plan.OptimizeDeviceDialing
+            }
+        }
+        
+        Write-AuditLog -Message "  Found $($phoneData.TenantDialPlans.Count) tenant dial plans." -Level Success
+    }
+    catch {
+        $phoneData.Errors += "Failed to retrieve tenant dial plans: $($_.Exception.Message)"
+        Write-AuditLog -Message "  Error retrieving tenant dial plans: $($_.Exception.Message)" -Level Warning
+    }
+    
+    # Collect Calling Policies (already collected but include voice-specific details)
+    try {
+        Write-AuditLog -Message "  Retrieving Teams calling policies..." -Level Info
+        $callingPolicies = Get-CsTeamsCallingPolicy -ErrorAction Stop
+        
+        foreach ($policy in $callingPolicies) {
+            $phoneData.CallingPolicies += @{
+                Identity = $policy.Identity
+                Description = $policy.Description
+                AllowPrivateCalling = $policy.AllowPrivateCalling
+                AllowVoicemail = $policy.AllowVoicemail
+                AllowCallGroups = $policy.AllowCallGroups
+                AllowDelegation = $policy.AllowDelegation
+                AllowCallForwardingToUser = $policy.AllowCallForwardingToUser
+                AllowCallForwardingToPhone = $policy.AllowCallForwardingToPhone
+                PreventTollBypass = $policy.PreventTollBypass
+                BusyOnBusyEnabledType = $policy.BusyOnBusyEnabledType
+                MusicOnHoldEnabledType = $policy.MusicOnHoldEnabledType
+                SafeTransferEnabled = $policy.SafeTransferEnabled
+                AllowCloudRecordingForCalls = $policy.AllowCloudRecordingForCalls
+                AllowTranscriptionForCalling = $policy.AllowTranscriptionForCalling
+                LiveCaptionsEnabledTypeForCalling = $policy.LiveCaptionsEnabledTypeForCalling
+                AutoAnswerEnabledType = $policy.AutoAnswerEnabledType
+                SpamFilteringEnabledType = $policy.SpamFilteringEnabledType
+                AllowSIPDevicesCalling = $policy.AllowSIPDevicesCalling
+                AllowWebPSTNCalling = $policy.AllowWebPSTNCalling
+                InboundPstnCallRoutingTreatment = $policy.InboundPstnCallRoutingTreatment
+                InboundFederatedCallRoutingTreatment = $policy.InboundFederatedCallRoutingTreatment
+                PopoutAppPathForIncomingPstnCalls = $policy.PopoutAppPathForIncomingPstnCalls
+                PopoutForIncomingPstnCalls = $policy.PopoutForIncomingPstnCalls
+            }
+        }
+        
+        Write-AuditLog -Message "  Found $($phoneData.CallingPolicies.Count) calling policies." -Level Success
+    }
+    catch {
+        $phoneData.Errors += "Failed to retrieve calling policies: $($_.Exception.Message)"
+        Write-AuditLog -Message "  Error retrieving calling policies: $($_.Exception.Message)" -Level Warning
+    }
+    
+    # Collect Call Park Policies
+    try {
+        Write-AuditLog -Message "  Retrieving call park policies..." -Level Info
+        $callParkPolicies = Get-CsTeamsCallParkPolicy -ErrorAction Stop
+        
+        foreach ($policy in $callParkPolicies) {
+            $phoneData.CallParkPolicies += @{
+                Identity = $policy.Identity
+                Description = $policy.Description
+                AllowCallPark = $policy.AllowCallPark
+                PickupRangeStart = $policy.PickupRangeStart
+                PickupRangeEnd = $policy.PickupRangeEnd
+                ParkTimeoutSeconds = $policy.ParkTimeoutSeconds
+            }
+        }
+        
+        Write-AuditLog -Message "  Found $($phoneData.CallParkPolicies.Count) call park policies." -Level Success
+    }
+    catch {
+        $phoneData.Errors += "Failed to retrieve call park policies: $($_.Exception.Message)"
+        Write-AuditLog -Message "  Error retrieving call park policies: $($_.Exception.Message)" -Level Warning
+    }
+    
+    # Collect Caller ID Policies
+    try {
+        Write-AuditLog -Message "  Retrieving caller ID policies..." -Level Info
+        $callerIdPolicies = Get-CsCallingLineIdentity -ErrorAction Stop
+        
+        foreach ($policy in $callerIdPolicies) {
+            $phoneData.CallerIDPolicies += @{
+                Identity = $policy.Identity
+                Description = $policy.Description
+                CallingIDSubstitute = $policy.CallingIDSubstitute
+                EnableUserOverride = $policy.EnableUserOverride
+                ServiceNumber = $policy.ServiceNumber
+                ResourceAccount = $policy.ResourceAccount
+                BlockIncomingPstnCallerID = $policy.BlockIncomingPstnCallerID
+                CompanyName = $policy.CompanyName
+            }
+        }
+        
+        Write-AuditLog -Message "  Found $($phoneData.CallerIDPolicies.Count) caller ID policies." -Level Success
+    }
+    catch {
+        $phoneData.Errors += "Failed to retrieve caller ID policies: $($_.Exception.Message)"
+        Write-AuditLog -Message "  Error retrieving caller ID policies: $($_.Exception.Message)" -Level Warning
+    }
+    
+    # Collect Call Hold Policies
+    try {
+        Write-AuditLog -Message "  Retrieving call hold policies..." -Level Info
+        $callHoldPolicies = Get-CsTeamsCallHoldPolicy -ErrorAction Stop
+        
+        foreach ($policy in $callHoldPolicies) {
+            $phoneData.CallHoldPolicies += @{
+                Identity = $policy.Identity
+                Description = $policy.Description
+                AudioFileId = $policy.AudioFileId
+            }
+        }
+        
+        Write-AuditLog -Message "  Found $($phoneData.CallHoldPolicies.Count) call hold policies." -Level Success
+    }
+    catch {
+        $phoneData.Errors += "Failed to retrieve call hold policies: $($_.Exception.Message)"
+        Write-AuditLog -Message "  Error retrieving call hold policies: $($_.Exception.Message)" -Level Warning
+    }
+    
+    # Collect Call Queues
+    try {
+        Write-AuditLog -Message "  Retrieving call queues..." -Level Info
+        $callQueues = Get-CsCallQueue -ErrorAction Stop
+        
+        foreach ($queue in $callQueues) {
+            $phoneData.CallQueues += @{
+                Identity = $queue.Identity
+                Name = $queue.Name
+                RoutingMethod = $queue.RoutingMethod
+                AgentAlertTime = $queue.AgentAlertTime
+                AllowOptOut = $queue.AllowOptOut
+                ConferenceMode = $queue.ConferenceMode
+                PresenceBasedRouting = $queue.PresenceBasedRouting
+                LanguageId = $queue.LanguageId
+                OverflowThreshold = $queue.OverflowThreshold
+                TimeoutThreshold = $queue.TimeoutThreshold
+                UseDefaultMusicOnHold = $queue.UseDefaultMusicOnHold
+                OverflowAction = $queue.OverflowAction
+                TimeoutAction = $queue.TimeoutAction
+                Agents = ($queue.Agents | Measure-Object).Count
+                DistributionLists = ($queue.DistributionLists | Measure-Object).Count
+                ChannelId = $queue.ChannelId
+            }
+        }
+        
+        Write-AuditLog -Message "  Found $($phoneData.CallQueues.Count) call queues." -Level Success
+    }
+    catch {
+        $phoneData.Errors += "Failed to retrieve call queues: $($_.Exception.Message)"
+        Write-AuditLog -Message "  Error retrieving call queues: $($_.Exception.Message)" -Level Warning
+    }
+    
+    # Collect Auto Attendants
+    try {
+        Write-AuditLog -Message "  Retrieving auto attendants..." -Level Info
+        $autoAttendants = Get-CsAutoAttendant -ErrorAction Stop
+        
+        foreach ($aa in $autoAttendants) {
+            $phoneData.AutoAttendants += @{
+                Identity = $aa.Identity
+                Name = $aa.Name
+                LanguageId = $aa.LanguageId
+                VoiceId = $aa.VoiceId
+                TimeZoneId = $aa.TimeZoneId
+                OperatorType = $aa.Operator.Type
+                VoiceResponseEnabled = $aa.VoiceResponseEnabled
+                DefaultCallFlowName = $aa.DefaultCallFlow.Name
+                CallFlowsCount = ($aa.CallFlows | Measure-Object).Count
+                SchedulesCount = ($aa.Schedules | Measure-Object).Count
+                CallHandlingAssociationsCount = ($aa.CallHandlingAssociations | Measure-Object).Count
+            }
+        }
+        
+        Write-AuditLog -Message "  Found $($phoneData.AutoAttendants.Count) auto attendants." -Level Success
+    }
+    catch {
+        $phoneData.Errors += "Failed to retrieve auto attendants: $($_.Exception.Message)"
+        Write-AuditLog -Message "  Error retrieving auto attendants: $($_.Exception.Message)" -Level Warning
+    }
+    
+    # Collect Resource Accounts (Application Instances)
+    try {
+        Write-AuditLog -Message "  Retrieving resource accounts (application instances)..." -Level Info
+        $resourceAccounts = Get-CsOnlineApplicationInstance -ErrorAction Stop
+        
+        foreach ($account in $resourceAccounts) {
+            $phoneData.ResourceAccounts += @{
+                ObjectId = $account.ObjectId
+                UserPrincipalName = $account.UserPrincipalName
+                DisplayName = $account.DisplayName
+                PhoneNumber = $account.PhoneNumber
+                ApplicationId = $account.ApplicationId
+            }
+        }
+        
+        Write-AuditLog -Message "  Found $($phoneData.ResourceAccounts.Count) resource accounts." -Level Success
+    }
+    catch {
+        $phoneData.Errors += "Failed to retrieve resource accounts: $($_.Exception.Message)"
+        Write-AuditLog -Message "  Error retrieving resource accounts: $($_.Exception.Message)" -Level Warning
+    }
+    
+    # Collect Emergency Calling Policies
+    try {
+        Write-AuditLog -Message "  Retrieving emergency calling policies..." -Level Info
+        $emergencyCallingPolicies = Get-CsTeamsEmergencyCallingPolicy -ErrorAction Stop
+        
+        foreach ($policy in $emergencyCallingPolicies) {
+            $phoneData.EmergencyCallingPolicies += @{
+                Identity = $policy.Identity
+                Description = $policy.Description
+                NotificationGroup = $policy.NotificationGroup
+                NotificationDialOutNumber = $policy.NotificationDialOutNumber
+                ExternalLocationLookupMode = $policy.ExternalLocationLookupMode
+                NotificationMode = $policy.NotificationMode
+                EnhancedEmergencyServiceDisclaimer = $policy.EnhancedEmergencyServiceDisclaimer
+            }
+        }
+        
+        Write-AuditLog -Message "  Found $($phoneData.EmergencyCallingPolicies.Count) emergency calling policies." -Level Success
+    }
+    catch {
+        $phoneData.Errors += "Failed to retrieve emergency calling policies: $($_.Exception.Message)"
+        Write-AuditLog -Message "  Error retrieving emergency calling policies: $($_.Exception.Message)" -Level Warning
+    }
+    
+    # Collect Emergency Call Routing Policies
+    try {
+        Write-AuditLog -Message "  Retrieving emergency call routing policies..." -Level Info
+        $emergencyCallRoutingPolicies = Get-CsTeamsEmergencyCallRoutingPolicy -ErrorAction Stop
+        
+        foreach ($policy in $emergencyCallRoutingPolicies) {
+            $phoneData.EmergencyCallRoutingPolicies += @{
+                Identity = $policy.Identity
+                Description = $policy.Description
+                AllowEnhancedEmergencyServices = $policy.AllowEnhancedEmergencyServices
+                EmergencyNumbers = $policy.EmergencyNumbers
+            }
+        }
+        
+        Write-AuditLog -Message "  Found $($phoneData.EmergencyCallRoutingPolicies.Count) emergency call routing policies." -Level Success
+    }
+    catch {
+        $phoneData.Errors += "Failed to retrieve emergency call routing policies: $($_.Exception.Message)"
+        Write-AuditLog -Message "  Error retrieving emergency call routing policies: $($_.Exception.Message)" -Level Warning
+    }
+    
+    # Collect Network Sites (for LBR and emergency services)
+    try {
+        Write-AuditLog -Message "  Retrieving network sites..." -Level Info
+        $networkSites = Get-CsTenantNetworkSite -ErrorAction Stop
+        
+        foreach ($site in $networkSites) {
+            $phoneData.NetworkSites += @{
+                Identity = $site.Identity
+                Description = $site.Description
+                NetworkRegionID = $site.NetworkRegionID
+                LocationPolicy = $site.LocationPolicy
+                EnableLocationBasedRouting = $site.EnableLocationBasedRouting
+                EmergencyCallingPolicy = $site.EmergencyCallingPolicy
+                EmergencyCallRoutingPolicy = $site.EmergencyCallRoutingPolicy
+                NetworkRoamingPolicy = $site.NetworkRoamingPolicy
+            }
+        }
+        
+        Write-AuditLog -Message "  Found $($phoneData.NetworkSites.Count) network sites." -Level Success
+    }
+    catch {
+        $phoneData.Errors += "Failed to retrieve network sites: $($_.Exception.Message)"
+        Write-AuditLog -Message "  Error retrieving network sites: $($_.Exception.Message)" -Level Warning
+    }
+    
+    # Collect Network Subnets
+    try {
+        Write-AuditLog -Message "  Retrieving network subnets..." -Level Info
+        $networkSubnets = Get-CsTenantNetworkSubnet -ErrorAction Stop
+        
+        foreach ($subnet in $networkSubnets) {
+            $phoneData.NetworkSubnets += @{
+                Identity = $subnet.Identity
+                Description = $subnet.Description
+                NetworkSiteID = $subnet.NetworkSiteID
+                MaskBits = $subnet.MaskBits
+            }
+        }
+        
+        Write-AuditLog -Message "  Found $($phoneData.NetworkSubnets.Count) network subnets." -Level Success
+    }
+    catch {
+        $phoneData.Errors += "Failed to retrieve network subnets: $($_.Exception.Message)"
+        Write-AuditLog -Message "  Error retrieving network subnets: $($_.Exception.Message)" -Level Warning
+    }
+    
+    # Collect Trusted IPs
+    try {
+        Write-AuditLog -Message "  Retrieving trusted IPs..." -Level Info
+        $trustedIPs = Get-CsTenantTrustedIPAddress -ErrorAction Stop
+        
+        foreach ($ip in $trustedIPs) {
+            $phoneData.TrustedIPs += @{
+                Identity = $ip.Identity
+                Description = $ip.Description
+                MaskBits = $ip.MaskBits
+            }
+        }
+        
+        Write-AuditLog -Message "  Found $($phoneData.TrustedIPs.Count) trusted IPs." -Level Success
+    }
+    catch {
+        $phoneData.Errors += "Failed to retrieve trusted IPs: $($_.Exception.Message)"
+        Write-AuditLog -Message "  Error retrieving trusted IPs: $($_.Exception.Message)" -Level Warning
+    }
+    
+    # Collect Voicemail Policies
+    try {
+        Write-AuditLog -Message "  Retrieving voicemail policies..." -Level Info
+        $voicemailPolicies = Get-CsOnlineVoicemailPolicy -ErrorAction Stop
+        
+        foreach ($policy in $voicemailPolicies) {
+            $phoneData.VoicemailPolicies += @{
+                Identity = $policy.Identity
+                Description = $policy.Description
+                EnableTranscription = $policy.EnableTranscription
+                ShareData = $policy.ShareData
+                EnableTranscriptionProfanityMasking = $policy.EnableTranscriptionProfanityMasking
+                EnableTranscriptionTranslation = $policy.EnableTranscriptionTranslation
+                EnableEditingCallAnswerRulesSetting = $policy.EnableEditingCallAnswerRulesSetting
+                MaximumRecordingLength = $policy.MaximumRecordingLength
+                PrimarySystemPromptLanguage = $policy.PrimarySystemPromptLanguage
+                SecondarySystemPromptLanguage = $policy.SecondarySystemPromptLanguage
+                PostambleAudioFile = $policy.PostambleAudioFile
+                PreambleAudioFile = $policy.PreambleAudioFile
+            }
+        }
+        
+        Write-AuditLog -Message "  Found $($phoneData.VoicemailPolicies.Count) voicemail policies." -Level Success
+    }
+    catch {
+        $phoneData.Errors += "Failed to retrieve voicemail policies: $($_.Exception.Message)"
+        Write-AuditLog -Message "  Error retrieving voicemail policies: $($_.Exception.Message)" -Level Warning
+    }
+    
+    # Collect Phone Numbers
+    try {
+        Write-AuditLog -Message "  Retrieving phone numbers..." -Level Info
+        $phoneNumbers = Get-CsPhoneNumberAssignment -ErrorAction SilentlyContinue
+        
+        if ($phoneNumbers) {
+            foreach ($number in $phoneNumbers) {
+                $phoneData.PhoneNumberAssignments += @{
+                    TelephoneNumber = $number.TelephoneNumber
+                    NumberType = $number.NumberType
+                    AssignedPstnTargetId = $number.AssignedPstnTargetId
+                    AssignmentCategory = $number.AssignmentCategory
+                    Capability = $number.Capability
+                    ActivationState = $number.ActivationState
+                    City = $number.City
+                    IsoCountryCode = $number.IsoCountryCode
+                    PortInOrderStatus = $number.PortInOrderStatus
+                }
+            }
+            
+            Write-AuditLog -Message "  Found $($phoneData.PhoneNumberAssignments.Count) phone number assignments." -Level Success
+        }
+    }
+    catch {
+        Write-AuditLog -Message "  Note: Phone number details may require additional permissions." -Level Warning
+    }
+    
+    # Collect Online PSTN Gateways (Direct Routing SBCs)
+    try {
+        Write-AuditLog -Message "  Retrieving online PSTN gateways (SBCs)..." -Level Info
+        $pstnGateways = Get-CsOnlinePSTNGateway -ErrorAction Stop
+        
+        foreach ($gateway in $pstnGateways) {
+            $phoneData.OnlinePSTNGateways += @{
+                Identity = $gateway.Identity
+                Fqdn = $gateway.Fqdn
+                SipSignalingPort = $gateway.SipSignalingPort
+                Enabled = $gateway.Enabled
+                MaxConcurrentSessions = $gateway.MaxConcurrentSessions
+                MediaBypass = $gateway.MediaBypass
+                GatewaySiteId = $gateway.GatewaySiteId
+                GatewaySiteLbrEnabled = $gateway.GatewaySiteLbrEnabled
+                BypassMode = $gateway.BypassMode
+                ProxySbc = $gateway.ProxySbc
+                MediaRelayRoutingLocationOverride = $gateway.MediaRelayRoutingLocationOverride
+                FailoverTimeSeconds = $gateway.FailoverTimeSeconds
+                ForwardCallHistory = $gateway.ForwardCallHistory
+                ForwardPai = $gateway.ForwardPai
+                SendSipOptions = $gateway.SendSipOptions
+                PidfLoSupported = $gateway.PidfLoSupported
+            }
+        }
+        
+        Write-AuditLog -Message "  Found $($phoneData.OnlinePSTNGateways.Count) PSTN gateways (SBCs)." -Level Success
+    }
+    catch {
+        $phoneData.Errors += "Failed to retrieve PSTN gateways: $($_.Exception.Message)"
+        Write-AuditLog -Message "  Error retrieving PSTN gateways: $($_.Exception.Message)" -Level Warning
+    }
+    
+    # Collect Mobility Policies
+    try {
+        Write-AuditLog -Message "  Retrieving Teams mobility policies..." -Level Info
+        $mobilityPolicies = Get-CsTeamsMobilityPolicy -ErrorAction Stop
+        
+        foreach ($policy in $mobilityPolicies) {
+            $phoneData.MobilityPolicies += @{
+                Identity = $policy.Identity
+                Description = $policy.Description
+                IPVideoMobileMode = $policy.IPVideoMobileMode
+                IPAudioMobileMode = $policy.IPAudioMobileMode
+                MobileDialerPreference = $policy.MobileDialerPreference
+            }
+        }
+        
+        Write-AuditLog -Message "  Found $($phoneData.MobilityPolicies.Count) mobility policies." -Level Success
+    }
+    catch {
+        $phoneData.Errors += "Failed to retrieve mobility policies: $($_.Exception.Message)"
+        Write-AuditLog -Message "  Error retrieving mobility policies: $($_.Exception.Message)" -Level Warning
+    }
+    
+    # Collect Survivable Branch Appliance Policies
+    try {
+        Write-AuditLog -Message "  Retrieving survivable branch appliance policies..." -Level Info
+        $sbaPolicies = Get-CsTeamsSurvivableBranchAppliancePolicy -ErrorAction SilentlyContinue
+        
+        if ($sbaPolicies) {
+            foreach ($policy in $sbaPolicies) {
+                $phoneData.SurvivableBranchAppliancePolicies += @{
+                    Identity = $policy.Identity
+                    Description = $policy.Description
+                    BranchApplianceFqdns = $policy.BranchApplianceFqdns
+                }
+            }
+            Write-AuditLog -Message "  Found $($phoneData.SurvivableBranchAppliancePolicies.Count) SBA policies." -Level Success
+        }
+    }
+    catch {
+        Write-AuditLog -Message "  Note: Survivable Branch Appliance policies not configured." -Level Warning
+    }
+    
+    # Collect Survivable Branch Appliances
+    try {
+        Write-AuditLog -Message "  Retrieving survivable branch appliances..." -Level Info
+        $sbas = Get-CsTeamsSurvivableBranchAppliance -ErrorAction SilentlyContinue
+        
+        if ($sbas) {
+            foreach ($sba in $sbas) {
+                $phoneData.SurvivableBranchAppliances += @{
+                    Identity = $sba.Identity
+                    Description = $sba.Description
+                    Fqdn = $sba.Fqdn
+                    Site = $sba.Site
+                }
+            }
+            Write-AuditLog -Message "  Found $($phoneData.SurvivableBranchAppliances.Count) SBAs." -Level Success
+        }
+    }
+    catch {
+        Write-AuditLog -Message "  Note: Survivable Branch Appliances not configured." -Level Warning
+    }
+    
+    # Collect Compliance Recording Policies
+    try {
+        Write-AuditLog -Message "  Retrieving compliance recording policies..." -Level Info
+        $complianceRecordingPolicies = Get-CsTeamsComplianceRecordingPolicy -ErrorAction SilentlyContinue
+        
+        if ($complianceRecordingPolicies) {
+            foreach ($policy in $complianceRecordingPolicies) {
+                $phoneData.ComplianceRecordingPolicies += @{
+                    Identity = $policy.Identity
+                    Description = $policy.Description
+                    Enabled = $policy.Enabled
+                    ComplianceRecordingApplications = $policy.ComplianceRecordingApplications
+                    WarnUserOnRemoval = $policy.WarnUserOnRemoval
+                    DisableComplianceRecordingAudioNotificationForCalls = $policy.DisableComplianceRecordingAudioNotificationForCalls
+                }
+            }
+            Write-AuditLog -Message "  Found $($phoneData.ComplianceRecordingPolicies.Count) compliance recording policies." -Level Success
+        }
+    }
+    catch {
+        Write-AuditLog -Message "  Note: Compliance recording policies not configured or accessible." -Level Warning
+    }
+    
+    # Collect Compliance Recording Applications
+    try {
+        Write-AuditLog -Message "  Retrieving compliance recording applications..." -Level Info
+        $complianceRecordingApps = Get-CsTeamsComplianceRecordingApplication -ErrorAction SilentlyContinue
+        
+        if ($complianceRecordingApps) {
+            foreach ($app in $complianceRecordingApps) {
+                $phoneData.ComplianceRecordingApplications += @{
+                    Identity = $app.Identity
+                    ComplianceRecordingPairedApplications = $app.ComplianceRecordingPairedApplications
+                    RequiredBeforeCallEstablishment = $app.RequiredBeforeCallEstablishment
+                    RequiredBeforeMeetingJoin = $app.RequiredBeforeMeetingJoin
+                    RequiredDuringCall = $app.RequiredDuringCall
+                    RequiredDuringMeeting = $app.RequiredDuringMeeting
+                    ConcurrentInvitationCount = $app.ConcurrentInvitationCount
+                }
+            }
+            Write-AuditLog -Message "  Found $($phoneData.ComplianceRecordingApplications.Count) compliance recording apps." -Level Success
+        }
+    }
+    catch {
+        Write-AuditLog -Message "  Note: Compliance recording applications not configured." -Level Warning
+    }
+    
+    # Check Network Configuration for LBR
+    try {
+        Write-AuditLog -Message "  Retrieving network configuration..." -Level Info
+        $networkConfig = Get-CsTenantNetworkConfiguration -ErrorAction SilentlyContinue
+        
+        if ($networkConfig) {
+            $phoneData.NetworkConfiguration = @{
+                EnableLocationBasedRouting = $networkConfig.EnableLocationBasedRouting
+                NetworkRegions = (Get-CsTenantNetworkRegion -ErrorAction SilentlyContinue | Measure-Object).Count
+            }
+            $phoneData.LocationBasedRoutingEnabled = $networkConfig.EnableLocationBasedRouting
+        }
+    }
+    catch {
+        Write-AuditLog -Message "  Note: Network configuration not available." -Level Warning
+    }
+    
+    # Calculate Statistics
+    $phoneData.Statistics = @{
+        TotalVoiceRoutingPolicies = $phoneData.OnlineVoiceRoutingPolicies.Count
+        TotalVoiceRoutes = $phoneData.OnlineVoiceRoutes.Count
+        TotalPSTNUsages = $phoneData.OnlinePSTNUsages.Count
+        TotalDialPlans = $phoneData.TenantDialPlans.Count
+        TotalCallingPolicies = $phoneData.CallingPolicies.Count
+        TotalCallParkPolicies = $phoneData.CallParkPolicies.Count
+        TotalCallerIDPolicies = $phoneData.CallerIDPolicies.Count
+        TotalCallHoldPolicies = $phoneData.CallHoldPolicies.Count
+        TotalCallQueues = $phoneData.CallQueues.Count
+        TotalAutoAttendants = $phoneData.AutoAttendants.Count
+        TotalResourceAccounts = $phoneData.ResourceAccounts.Count
+        TotalEmergencyCallingPolicies = $phoneData.EmergencyCallingPolicies.Count
+        TotalEmergencyCallRoutingPolicies = $phoneData.EmergencyCallRoutingPolicies.Count
+        TotalNetworkSites = $phoneData.NetworkSites.Count
+        TotalNetworkSubnets = $phoneData.NetworkSubnets.Count
+        TotalTrustedIPs = $phoneData.TrustedIPs.Count
+        TotalVoicemailPolicies = $phoneData.VoicemailPolicies.Count
+        TotalPhoneNumberAssignments = $phoneData.PhoneNumberAssignments.Count
+        TotalPSTNGateways = $phoneData.OnlinePSTNGateways.Count
+        TotalMobilityPolicies = $phoneData.MobilityPolicies.Count
+        TotalSBAs = $phoneData.SurvivableBranchAppliances.Count
+        TotalComplianceRecordingPolicies = $phoneData.ComplianceRecordingPolicies.Count
+        LocationBasedRoutingEnabled = $phoneData.LocationBasedRoutingEnabled
+    }
+    
+    Write-AuditLog -Message "  Teams Phone Statistics Summary:" -Level Info
+    Write-AuditLog -Message "    Voice Routing Policies: $($phoneData.Statistics.TotalVoiceRoutingPolicies)" -Level Info
+    Write-AuditLog -Message "    Voice Routes: $($phoneData.Statistics.TotalVoiceRoutes)" -Level Info
+    Write-AuditLog -Message "    Dial Plans: $($phoneData.Statistics.TotalDialPlans)" -Level Info
+    Write-AuditLog -Message "    Call Queues: $($phoneData.Statistics.TotalCallQueues)" -Level Info
+    Write-AuditLog -Message "    Auto Attendants: $($phoneData.Statistics.TotalAutoAttendants)" -Level Info
+    Write-AuditLog -Message "    Resource Accounts: $($phoneData.Statistics.TotalResourceAccounts)" -Level Info
+    Write-AuditLog -Message "    PSTN Gateways (SBCs): $($phoneData.Statistics.TotalPSTNGateways)" -Level Info
+    Write-AuditLog -Message "    Phone Number Assignments: $($phoneData.Statistics.TotalPhoneNumberAssignments)" -Level Info
+    Write-AuditLog -Message "    Network Sites: $($phoneData.Statistics.TotalNetworkSites)" -Level Success
+    
+    return $phoneData
+}
+
+function Get-TeamsGovernanceAuditData {
+    <#
+    .SYNOPSIS
+        Collects all Teams governance configuration data.
+    #>
+    [CmdletBinding()]
+    param()
+    
+    Write-AuditLog -Message "Collecting Teams Governance Data..." -Level Header
+    
+    $governanceData = @{
+        TeamCreationControls = @{}
+        NamingPolicies = @{}
+        SensitivityLabels = @()
+        ExternalAccess = @{}
+        GuestAccess = @{}
+        SharedChannels = @{}
+        B2BCollaboration = @{}
+        AccessReviews = @()
+        CollectionTime = Get-Date
+        Errors = @()
+    }
+    
+    # Collect Team Creation Controls
+    try {
+        Write-AuditLog -Message "  Retrieving team creation controls..." -Level Info
+        $groupSettings = Get-MgDirectorySetting -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -eq "Group.Unified" }
+        
+        if ($groupSettings) {
+            $settingsValues = @{}
+            foreach ($value in $groupSettings.Values) {
+                $settingsValues[$value.Name] = $value.Value
+            }
+            
+            $governanceData.TeamCreationControls = @{
+                EnableGroupCreation = $settingsValues["EnableGroupCreation"]
+                GroupCreationAllowedGroupId = $settingsValues["GroupCreationAllowedGroupId"]
+                AllowGuestsToBeGroupOwner = $settingsValues["AllowGuestsToBeGroupOwner"]
+                AllowGuestsToAccessGroups = $settingsValues["AllowGuestsToAccessGroups"]
+                UsageGuidelinesUrl = $settingsValues["UsageGuidelinesUrl"]
+                ClassificationList = $settingsValues["ClassificationList"]
+                EnableMIPLabels = $settingsValues["EnableMIPLabels"]
+            }
+        }
+        
+        Write-AuditLog -Message "  Team creation controls retrieved." -Level Success
+    }
+    catch {
+        $governanceData.Errors += "Failed to retrieve team creation controls: $($_.Exception.Message)"
+        Write-AuditLog -Message "  Error retrieving team creation controls: $($_.Exception.Message)" -Level Warning
+    }
+    
+    # Collect External Access Settings
+    try {
+        Write-AuditLog -Message "  Retrieving external access settings..." -Level Info
+        $externalAccess = Get-CsTenantFederationConfiguration -ErrorAction Stop
+        
+        $governanceData.ExternalAccess = @{
+            AllowFederatedUsers = $externalAccess.AllowFederatedUsers
+            AllowedDomains = $externalAccess.AllowedDomains
+            BlockedDomains = $externalAccess.BlockedDomains
+            AllowTeamsConsumer = $externalAccess.AllowTeamsConsumer
+            AllowTeamsConsumerInbound = $externalAccess.AllowTeamsConsumerInbound
+            AllowPublicUsers = $externalAccess.AllowPublicUsers
+            TreatDiscoveredPartnersAsUnverified = $externalAccess.TreatDiscoveredPartnersAsUnverified
+            SharedSipAddressSpace = $externalAccess.SharedSipAddressSpace
+        }
+        
+        Write-AuditLog -Message "  External access settings retrieved successfully." -Level Success
+    }
+    catch {
+        $governanceData.Errors += "Failed to retrieve external access settings: $($_.Exception.Message)"
+        Write-AuditLog -Message "  Error retrieving external access settings: $($_.Exception.Message)" -Level Error
+    }
+    
+    # Collect Guest Access Settings
+    try {
+        Write-AuditLog -Message "  Retrieving guest access settings..." -Level Info
+        $guestAccess = Get-CsTeamsGuestMessagingConfiguration -ErrorAction Stop
+        $guestMeeting = Get-CsTeamsGuestMeetingConfiguration -ErrorAction Stop
+        $guestCalling = Get-CsTeamsGuestCallingConfiguration -ErrorAction Stop
+        
+        $governanceData.GuestAccess = @{
+            AllowUserEditMessage = $guestAccess.AllowUserEditMessage
+            AllowUserDeleteMessage = $guestAccess.AllowUserDeleteMessage
+            AllowUserChat = $guestAccess.AllowUserChat
+            AllowGiphy = $guestAccess.AllowGiphy
+            GiphyRatingType = $guestAccess.GiphyRatingType
+            AllowMemes = $guestAccess.AllowMemes
+            AllowStickers = $guestAccess.AllowStickers
+            AllowImmersiveReader = $guestAccess.AllowImmersiveReader
+            AllowIPVideo = $guestMeeting.AllowIPVideo
+            ScreenSharingMode = $guestMeeting.ScreenSharingMode
+            AllowMeetNow = $guestMeeting.AllowMeetNow
+            LiveCaptionsEnabledType = $guestMeeting.LiveCaptionsEnabledType
+            AllowPrivateCalling = $guestCalling.AllowPrivateCalling
+        }
+        
+        Write-AuditLog -Message "  Guest access settings retrieved successfully." -Level Success
+    }
+    catch {
+        $governanceData.Errors += "Failed to retrieve guest access settings: $($_.Exception.Message)"
+        Write-AuditLog -Message "  Error retrieving guest access settings: $($_.Exception.Message)" -Level Error
+    }
+    
+    # Collect Shared Channels Configuration
+    try {
+        Write-AuditLog -Message "  Retrieving shared channels configuration..." -Level Info
+        $channelsPolicy = Get-CsTeamsChannelsPolicy -Identity "Global" -ErrorAction Stop
+        
+        $governanceData.SharedChannels = @{
+            AllowSharedChannelCreation = $channelsPolicy.AllowSharedChannelCreation
+            AllowChannelSharingToExternalUser = $channelsPolicy.AllowChannelSharingToExternalUser
+            AllowUserToParticipateInExternalSharedChannel = $channelsPolicy.AllowUserToParticipateInExternalSharedChannel
+        }
+        
+        Write-AuditLog -Message "  Shared channels configuration retrieved." -Level Success
+    }
+    catch {
+        $governanceData.Errors += "Failed to retrieve shared channels configuration: $($_.Exception.Message)"
+        Write-AuditLog -Message "  Error retrieving shared channels configuration: $($_.Exception.Message)" -Level Warning
+    }
+    
+    # Collect Access Reviews
+    try {
+        Write-AuditLog -Message "  Retrieving access reviews..." -Level Info
+        $accessReviews = Get-MgIdentityGovernanceAccessReviewDefinition -ErrorAction SilentlyContinue
+        
+        if ($accessReviews) {
+            foreach ($review in $accessReviews) {
+                $governanceData.AccessReviews += @{
+                    Id = $review.Id
+                    DisplayName = $review.DisplayName
+                    Status = $review.Status
+                    CreatedDateTime = $review.CreatedDateTime
+                }
+            }
+        }
+        
+        Write-AuditLog -Message "  Found $($governanceData.AccessReviews.Count) access reviews." -Level Success
+    }
+    catch {
+        $governanceData.Errors += "Failed to retrieve access reviews: $($_.Exception.Message)"
+        Write-AuditLog -Message "  Note: Access reviews require Azure AD Premium P2 license." -Level Warning
+    }
+    
+    return $governanceData
+}
+
+function Get-TeamsLifecycleAuditData {
+    <#
+    .SYNOPSIS
+        Collects Teams lifecycle management configuration data.
+    #>
+    [CmdletBinding()]
+    param()
+    
+    Write-AuditLog -Message "Collecting Lifecycle Management Data..." -Level Header
+    
+    $lifecycleData = @{
+        ExpirationPolicy = @{}
+        RetentionPolicies = @()
+        CollectionTime = Get-Date
+        Errors = @()
+    }
+    
+    try {
+        Write-AuditLog -Message "  Retrieving group expiration policy..." -Level Info
+        $expirationPolicy = Get-MgGroupLifecyclePolicy -ErrorAction SilentlyContinue
+        
+        if ($expirationPolicy) {
+            $lifecycleData.ExpirationPolicy = @{
+                Id = $expirationPolicy.Id
+                GroupLifetimeInDays = $expirationPolicy.GroupLifetimeInDays
+                ManagedGroupTypes = $expirationPolicy.ManagedGroupTypes
+                AlternateNotificationEmails = $expirationPolicy.AlternateNotificationEmails
+            }
+        }
+        else {
+            $lifecycleData.ExpirationPolicy = @{
+                Status = "Not Configured"
+                GroupLifetimeInDays = "N/A"
+                ManagedGroupTypes = "N/A"
+            }
+        }
+        
+        Write-AuditLog -Message "  Expiration policy retrieved." -Level Success
+    }
+    catch {
+        $lifecycleData.Errors += "Failed to retrieve expiration policy: $($_.Exception.Message)"
+        Write-AuditLog -Message "  Error retrieving expiration policy: $($_.Exception.Message)" -Level Warning
+    }
+    
+    $lifecycleData.RetentionPolicies = @(@{
+        Status = "Requires Security and Compliance PowerShell"
+        Note = "Use Connect-IPPSSession and Get-RetentionCompliancePolicy for detailed data"
+    })
+    
+    return $lifecycleData
+}
+
+function Get-TeamsSecurityComplianceAuditData {
+    <#
+    .SYNOPSIS
+        Collects Teams security and compliance configuration data.
+    #>
+    [CmdletBinding()]
+    param()
+    
+    Write-AuditLog -Message "Collecting Security and Compliance Data..." -Level Header
+    
+    $securityData = @{
+        DataLossPrevention = @()
+        ConditionalAccessPolicies = @()
+        DefenderSettings = @{}
+        PIMRoleAssignments = @()
+        InformationBarriers = @{}
+        CollectionTime = Get-Date
+        Errors = @()
+    }
+    
+    # Collect Conditional Access Policies
+    try {
+        Write-AuditLog -Message "  Retrieving Conditional Access policies..." -Level Info
+        $caPolicies = Get-MgIdentityConditionalAccessPolicy -All -ErrorAction SilentlyContinue
+        
+        $teamsAppId = "cc15fd57-2c6c-4117-a88c-83b1d56b4bbe"
+        
+        foreach ($policy in $caPolicies) {
+            $appliesToTeams = $false
+            if ($policy.Conditions.Applications.IncludeApplications -contains $teamsAppId -or
+                $policy.Conditions.Applications.IncludeApplications -contains "All") {
+                $appliesToTeams = $true
+            }
+            
+            if ($appliesToTeams -or $policy.DisplayName -like "*Teams*") {
+                $securityData.ConditionalAccessPolicies += @{
+                    Id = $policy.Id
+                    DisplayName = $policy.DisplayName
+                    State = $policy.State
+                    CreatedDateTime = $policy.CreatedDateTime
+                    ModifiedDateTime = $policy.ModifiedDateTime
+                    IncludeUsers = ($policy.Conditions.Users.IncludeUsers -join ", ")
+                    IncludeGroups = ($policy.Conditions.Users.IncludeGroups -join ", ")
+                    IncludeApplications = ($policy.Conditions.Applications.IncludeApplications -join ", ")
+                    GrantControls = ($policy.GrantControls.BuiltInControls -join ", ")
+                    SessionControls = if ($policy.SessionControls) { "Configured" } else { "None" }
+                }
+            }
+        }
+        
+        Write-AuditLog -Message "  Found $($securityData.ConditionalAccessPolicies.Count) Teams-related Conditional Access policies." -Level Success
+    }
+    catch {
+        $securityData.Errors += "Failed to retrieve Conditional Access policies: $($_.Exception.Message)"
+        Write-AuditLog -Message "  Error retrieving Conditional Access policies: $($_.Exception.Message)" -Level Warning
+    }
+    
+    # Collect PIM Role Assignments for Teams
+    try {
+        Write-AuditLog -Message "  Retrieving PIM role assignments for Teams admin roles..." -Level Info
+        
+        $teamsRoleIds = @(
+            "69091246-20e8-4a56-aa4d-066075b2a7a8"  # Teams Administrator
+            "baf37b3a-610e-45da-9e62-d9d1e5e8914b"  # Teams Communications Administrator
+            "3d762c5a-1b6c-493f-843e-55a3b42923d4"  # Teams Devices Administrator
+        )
+        
+        foreach ($roleId in $teamsRoleIds) {
+            try {
+                $roleDefinition = Get-MgRoleManagementDirectoryRoleDefinition -UnifiedRoleDefinitionId $roleId -ErrorAction SilentlyContinue
+                
+                if ($roleDefinition) {
+                    $permanentAssignments = Get-MgRoleManagementDirectoryRoleAssignment -Filter "roleDefinitionId eq '$roleId'" -ErrorAction SilentlyContinue
+                    
+                    foreach ($assignment in $permanentAssignments) {
+                        $principal = Get-MgDirectoryObject -DirectoryObjectId $assignment.PrincipalId -ErrorAction SilentlyContinue
+                        
+                        $securityData.PIMRoleAssignments += @{
+                            RoleName = $roleDefinition.DisplayName
+                            RoleId = $roleId
+                            PrincipalId = $assignment.PrincipalId
+                            PrincipalName = $principal.AdditionalProperties.displayName
+                            AssignmentType = "Permanent"
+                            Status = "Active"
+                        }
+                    }
+                }
+            }
+            catch { }
+        }
+        
+        Write-AuditLog -Message "  Found $($securityData.PIMRoleAssignments.Count) Teams admin role assignments." -Level Success
+    }
+    catch {
+        $securityData.Errors += "Failed to retrieve PIM role assignments: $($_.Exception.Message)"
+        Write-AuditLog -Message "  Error retrieving PIM role assignments: $($_.Exception.Message)" -Level Warning
+    }
+    
+    $securityData.DataLossPrevention = @(@{
+        Status = "Requires Security and Compliance PowerShell"
+        Note = "Use Connect-IPPSSession and Get-DlpCompliancePolicy for detailed DLP policies"
+    })
+    
+    $securityData.DefenderSettings = @{
+        Status = "Requires Security portal access"
+        Note = "Microsoft Defender for Office 365 settings are managed in the Security portal"
+    }
+    
+    $securityData.InformationBarriers = @{
+        Status = "Requires Security and Compliance PowerShell"
+        Note = "Use Get-InformationBarrierPolicy in Security and Compliance PowerShell for full details"
+    }
+    
+    return $securityData
+}
+#endregion
+
+#region Report Generation Functions
+function New-TeamsAuditExcelReport {
+    <#
+    .SYNOPSIS
+        Generates a detailed Excel report of the audit findings.
+    .DESCRIPTION
+        Creates an Excel workbook with multiple worksheets containing all audit results,
+        comparing current settings against defaults and best practices.
+    .PARAMETER AuditData
+        Hashtable containing all collected audit data.
+    .PARAMETER BestPractices
+        Hashtable containing best practices reference data.
+    .PARAMETER OutputPath
+        Directory path where the report will be saved.
+    .OUTPUTS
+        Returns the path to the generated Excel file.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [hashtable]$AuditData,
+        
+        [Parameter(Mandatory = $true)]
+        [hashtable]$BestPractices,
+        
+        [Parameter(Mandatory = $true)]
+        [string]$OutputPath
+    )
+    
+    Write-AuditLog -Message "Generating Excel report..." -Level Header
+    
+    $timestamp = $script:StartTime.ToString("yyyyMMdd_HHmmss")
+    $reportPath = Join-Path -Path $OutputPath -ChildPath "TeamsAudit_Report_$timestamp.xlsx"
+    
+    try {
+        # Create Summary worksheet
+        Write-AuditLog -Message "  Creating Summary worksheet..." -Level Info
+        $summaryData = @(
+            [PSCustomObject]@{
+                Category = "Audit Information"
+                Item = "Report Generated"
+                Value = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+            }
+            [PSCustomObject]@{
+                Category = "Audit Information"
+                Item = "Author"
+                Value = "Kelvin Chigorimbo"
+            }
+            [PSCustomObject]@{
+                Category = "Audit Information"
+                Item = "Script Version"
+                Value = $script:ScriptVersion
+            }
+        )
+        
+        if ($AuditData.Teams -and $AuditData.Teams.Statistics) {
+            $stats = $AuditData.Teams.Statistics
+            $summaryData += [PSCustomObject]@{ Category = "Teams Overview"; Item = "Total Teams"; Value = $stats.TotalTeams }
+            $summaryData += [PSCustomObject]@{ Category = "Teams Overview"; Item = "Active Teams"; Value = $stats.ActiveTeams }
+            $summaryData += [PSCustomObject]@{ Category = "Teams Overview"; Item = "Archived Teams"; Value = $stats.ArchivedTeams }
+            $summaryData += [PSCustomObject]@{ Category = "Teams Overview"; Item = "Public Teams"; Value = $stats.PublicTeams }
+            $summaryData += [PSCustomObject]@{ Category = "Teams Overview"; Item = "Private Teams"; Value = $stats.PrivateTeams }
+        }
+        
+        $summaryData | Export-Excel -Path $reportPath -WorksheetName "Summary" -AutoSize -TableName "Summary" -TableStyle Medium2
+        
+        # Create Meeting Policies worksheet
+        Write-AuditLog -Message "  Creating Meeting Policies worksheet..." -Level Info
+        if ($AuditData.TeamsMeetings -and $AuditData.TeamsMeetings.MeetingPolicies) {
+            $meetingPoliciesData = @()
+            $bp = $BestPractices.MeetingPolicies
+            
+            foreach ($policy in $AuditData.TeamsMeetings.MeetingPolicies) {
+                foreach ($setting in $bp.Keys) {
+                    if ($policy.ContainsKey($setting)) {
+                        $currentValue = $policy[$setting]
+                        $defaultValue = $bp[$setting].Default
+                        $bestPracticeValue = $bp[$setting].BestPractice
+                        
+                        $compliance = "Review"
+                        if ([string]$currentValue -eq [string]$bestPracticeValue) {
+                            $compliance = "Compliant"
+                        }
+                        elseif ([string]$currentValue -eq [string]$defaultValue -and [string]$defaultValue -ne [string]$bestPracticeValue) {
+                            $compliance = "Default (Non-Optimal)"
+                        }
+                        
+                        $meetingPoliciesData += [PSCustomObject]@{
+                            PolicyName = $policy.Identity
+                            Setting = $setting
+                            CurrentValue = [string]$currentValue
+                            DefaultValue = [string]$defaultValue
+                            BestPractice = [string]$bestPracticeValue
+                            Compliance = $compliance
+                            Explanation = $bp[$setting].Explanation
+                            Recommendation = $bp[$setting].Recommendation
+                        }
+                    }
+                }
+            }
+            
+            if ($meetingPoliciesData.Count -gt 0) {
+                $meetingPoliciesData | Export-Excel -Path $reportPath -WorksheetName "Meeting Policies" -AutoSize -TableName "MeetingPolicies" -TableStyle Medium2 -Append
+            }
+        }
+        
+        # Create Messaging Policies worksheet
+        Write-AuditLog -Message "  Creating Messaging Policies worksheet..." -Level Info
+        if ($AuditData.TeamsMessaging -and $AuditData.TeamsMessaging.MessagingPolicies) {
+            $messagingPoliciesData = @()
+            $bp = $BestPractices.MessagingPolicies
+            
+            foreach ($policy in $AuditData.TeamsMessaging.MessagingPolicies) {
+                foreach ($setting in $bp.Keys) {
+                    if ($policy.ContainsKey($setting)) {
+                        $currentValue = $policy[$setting]
+                        $defaultValue = $bp[$setting].Default
+                        $bestPracticeValue = $bp[$setting].BestPractice
+                        
+                        $compliance = "Review"
+                        if ([string]$currentValue -eq [string]$bestPracticeValue) {
+                            $compliance = "Compliant"
+                        }
+                        elseif ([string]$currentValue -eq [string]$defaultValue -and [string]$defaultValue -ne [string]$bestPracticeValue) {
+                            $compliance = "Default (Non-Optimal)"
+                        }
+                        
+                        $messagingPoliciesData += [PSCustomObject]@{
+                            PolicyName = $policy.Identity
+                            Setting = $setting
+                            CurrentValue = [string]$currentValue
+                            DefaultValue = [string]$defaultValue
+                            BestPractice = [string]$bestPracticeValue
+                            Compliance = $compliance
+                            Explanation = $bp[$setting].Explanation
+                            Recommendation = $bp[$setting].Recommendation
+                        }
+                    }
+                }
+            }
+            
+            if ($messagingPoliciesData.Count -gt 0) {
+                $messagingPoliciesData | Export-Excel -Path $reportPath -WorksheetName "Messaging Policies" -AutoSize -TableName "MessagingPolicies" -TableStyle Medium2 -Append
+            }
+        }
+        
+        # Create External Access worksheet
+        Write-AuditLog -Message "  Creating External Access worksheet..." -Level Info
+        if ($AuditData.TeamsGovernance -and $AuditData.TeamsGovernance.ExternalAccess) {
+            $externalAccessData = @()
+            $bp = $BestPractices.ExternalAccess
+            $extAccess = $AuditData.TeamsGovernance.ExternalAccess
+            
+            foreach ($setting in $bp.Keys) {
+                if ($extAccess.ContainsKey($setting)) {
+                    $currentValue = $extAccess[$setting]
+                    $defaultValue = $bp[$setting].Default
+                    $bestPracticeValue = $bp[$setting].BestPractice
+                    
+                    $compliance = "Review"
+                    if ([string]$currentValue -eq [string]$bestPracticeValue) {
+                        $compliance = "Compliant"
+                    }
+                    elseif ([string]$currentValue -eq [string]$defaultValue -and [string]$defaultValue -ne [string]$bestPracticeValue) {
+                        $compliance = "Default (Non-Optimal)"
+                    }
+                    
+                    $externalAccessData += [PSCustomObject]@{
+                        Setting = $setting
+                        CurrentValue = [string]$currentValue
+                        DefaultValue = [string]$defaultValue
+                        BestPractice = [string]$bestPracticeValue
+                        Compliance = $compliance
+                        Explanation = $bp[$setting].Explanation
+                        Recommendation = $bp[$setting].Recommendation
+                    }
+                }
+            }
+            
+            if ($externalAccessData.Count -gt 0) {
+                $externalAccessData | Export-Excel -Path $reportPath -WorksheetName "External Access" -AutoSize -TableName "ExternalAccess" -TableStyle Medium2 -Append
+            }
+        }
+        
+        # Create App Policies worksheet
+        Write-AuditLog -Message "  Creating App Policies worksheet..." -Level Info
+        if ($AuditData.TeamsAppManagement -and $AuditData.TeamsAppManagement.SetupPolicies) {
+            $appPoliciesData = @()
+            $bp = $BestPractices.AppPolicies
+            
+            foreach ($policy in $AuditData.TeamsAppManagement.SetupPolicies) {
+                foreach ($setting in $bp.Keys) {
+                    if ($policy.ContainsKey($setting)) {
+                        $currentValue = $policy[$setting]
+                        $defaultValue = $bp[$setting].Default
+                        $bestPracticeValue = $bp[$setting].BestPractice
+                        
+                        $compliance = "Review"
+                        if ([string]$currentValue -eq [string]$bestPracticeValue) {
+                            $compliance = "Compliant"
+                        }
+                        elseif ([string]$currentValue -eq [string]$defaultValue -and [string]$defaultValue -ne [string]$bestPracticeValue) {
+                            $compliance = "Default (Non-Optimal)"
+                        }
+                        
+                        $appPoliciesData += [PSCustomObject]@{
+                            PolicyName = $policy.Identity
+                            Setting = $setting
+                            CurrentValue = [string]$currentValue
+                            DefaultValue = [string]$defaultValue
+                            BestPractice = [string]$bestPracticeValue
+                            Compliance = $compliance
+                            Explanation = $bp[$setting].Explanation
+                            Recommendation = $bp[$setting].Recommendation
+                        }
+                    }
+                }
+            }
+            
+            if ($appPoliciesData.Count -gt 0) {
+                $appPoliciesData | Export-Excel -Path $reportPath -WorksheetName "App Policies" -AutoSize -TableName "AppPolicies" -TableStyle Medium2 -Append
+            }
+        }
+        
+        # Create Channels Policies worksheet
+        Write-AuditLog -Message "  Creating Channels Policies worksheet..." -Level Info
+        if ($AuditData.TeamsPolicies -and $AuditData.TeamsPolicies.ChannelsPolicies) {
+            $channelsPoliciesData = foreach ($policy in $AuditData.TeamsPolicies.ChannelsPolicies) {
+                [PSCustomObject]@{
+                    Identity = $policy.Identity
+                    Description = $policy.Description
+                    AllowOrgWideTeamCreation = $policy.AllowOrgWideTeamCreation
+                    EnablePrivateTeamDiscovery = $policy.EnablePrivateTeamDiscovery
+                    AllowPrivateChannelCreation = $policy.AllowPrivateChannelCreation
+                    AllowSharedChannelCreation = $policy.AllowSharedChannelCreation
+                    AllowChannelSharingToExternalUser = $policy.AllowChannelSharingToExternalUser
+                    AllowUserToParticipateInExternalSharedChannel = $policy.AllowUserToParticipateInExternalSharedChannel
+                }
+            }
+            
+            $channelsPoliciesData | Export-Excel -Path $reportPath -WorksheetName "Channels Policies" -AutoSize -TableName "ChannelsPolicies" -TableStyle Medium2 -Append
+        }
+        
+        # Create Encryption Policies worksheet
+        Write-AuditLog -Message "  Creating Encryption Policies worksheet..." -Level Info
+        if ($AuditData.TeamsEncryption -and $AuditData.TeamsEncryption.EncryptionPolicies) {
+            $encryptionPoliciesData = foreach ($policy in $AuditData.TeamsEncryption.EncryptionPolicies) {
+                [PSCustomObject]@{
+                    Identity = $policy.Identity
+                    Description = $policy.Description
+                    CallingEndToEndEncryptionEnabledType = $policy.CallingEndToEndEncryptionEnabledType
+                    MeetingEndToEndEncryption = $policy.MeetingEndToEndEncryption
+                    BestPractice = $BestPractices.EnhancedEncryption.AllowEndToEndEncryption.BestPractice
+                    Recommendation = $BestPractices.EnhancedEncryption.AllowEndToEndEncryption.Recommendation
+                }
+            }
+            
+            $encryptionPoliciesData | Export-Excel -Path $reportPath -WorksheetName "Encryption Policies" -AutoSize -TableName "EncryptionPolicies" -TableStyle Medium2 -Append
+        }
+        
+        # Create Live Event Policies worksheet
+        Write-AuditLog -Message "  Creating Live Event Policies worksheet..." -Level Info
+        if ($AuditData.TeamsMeetings -and $AuditData.TeamsMeetings.LiveEventPolicies) {
+            $liveEventPoliciesData = @()
+            $bp = $BestPractices.LiveEventsPolicies
+            
+            foreach ($policy in $AuditData.TeamsMeetings.LiveEventPolicies) {
+                foreach ($setting in $bp.Keys) {
+                    if ($policy.ContainsKey($setting)) {
+                        $currentValue = $policy[$setting]
+                        $defaultValue = $bp[$setting].Default
+                        $bestPracticeValue = $bp[$setting].BestPractice
+                        
+                        $compliance = "Review"
+                        if ([string]$currentValue -eq [string]$bestPracticeValue) {
+                            $compliance = "Compliant"
+                        }
+                        
+                        $liveEventPoliciesData += [PSCustomObject]@{
+                            PolicyName = $policy.Identity
+                            Setting = $setting
+                            CurrentValue = [string]$currentValue
+                            DefaultValue = [string]$defaultValue
+                            BestPractice = [string]$bestPracticeValue
+                            Compliance = $compliance
+                            Explanation = $bp[$setting].Explanation
+                            Recommendation = $bp[$setting].Recommendation
+                        }
+                    }
+                }
+            }
+            
+            if ($liveEventPoliciesData.Count -gt 0) {
+                $liveEventPoliciesData | Export-Excel -Path $reportPath -WorksheetName "Live Event Policies" -AutoSize -TableName "LiveEventPolicies" -TableStyle Medium2 -Append
+            }
+        }
+        
+        # Create Device Policies worksheet
+        Write-AuditLog -Message "  Creating Device Policies worksheet..." -Level Info
+        if ($AuditData.TeamsDevices -and $AuditData.TeamsDevices.DevicePolicies) {
+            $devicePoliciesData = foreach ($policy in $AuditData.TeamsDevices.DevicePolicies) {
+                [PSCustomObject]@{
+                    Identity = $policy.Identity
+                    Description = $policy.Description
+                    SignInMode = $policy.SignInMode
+                    SearchOnCommonAreaPhoneMode = $policy.SearchOnCommonAreaPhoneMode
+                    AllowHomeScreen = $policy.AllowHomeScreen
+                    AllowBetterTogether = $policy.AllowBetterTogether
+                    AllowHotDesking = $policy.AllowHotDesking
+                    HotDeskingIdleTimeoutInMinutes = $policy.HotDeskingIdleTimeoutInMinutes
+                }
+            }
+            
+            $devicePoliciesData | Export-Excel -Path $reportPath -WorksheetName "Device Policies" -AutoSize -TableName "DevicePolicies" -TableStyle Medium2 -Append
+        }
+        
+        # Create Conditional Access worksheet
+        Write-AuditLog -Message "  Creating Conditional Access worksheet..." -Level Info
+        if ($AuditData.TeamsSecurity -and $AuditData.TeamsSecurity.ConditionalAccessPolicies) {
+            $caPoliciesData = foreach ($policy in $AuditData.TeamsSecurity.ConditionalAccessPolicies) {
+                [PSCustomObject]@{
+                    DisplayName = $policy.DisplayName
+                    State = $policy.State
+                    IncludeUsers = $policy.IncludeUsers
+                    IncludeGroups = $policy.IncludeGroups
+                    IncludeApplications = $policy.IncludeApplications
+                    GrantControls = $policy.GrantControls
+                    SessionControls = $policy.SessionControls
+                    CreatedDateTime = $policy.CreatedDateTime
+                }
+            }
+            
+            $caPoliciesData | Export-Excel -Path $reportPath -WorksheetName "Conditional Access" -AutoSize -TableName "ConditionalAccess" -TableStyle Medium2 -Append
+        }
+        
+        # Create PIM Role Assignments worksheet
+        Write-AuditLog -Message "  Creating PIM Role Assignments worksheet..." -Level Info
+        if ($AuditData.TeamsSecurity -and $AuditData.TeamsSecurity.PIMRoleAssignments) {
+            $pimData = foreach ($assignment in $AuditData.TeamsSecurity.PIMRoleAssignments) {
+                [PSCustomObject]@{
+                    RoleName = $assignment.RoleName
+                    PrincipalName = $assignment.PrincipalName
+                    AssignmentType = $assignment.AssignmentType
+                    Status = $assignment.Status
+                    Recommendation = "Use Eligible assignments with PIM for just-in-time access"
+                }
+            }
+            
+            $pimData | Export-Excel -Path $reportPath -WorksheetName "PIM Assignments" -AutoSize -TableName "PIMAssignments" -TableStyle Medium2 -Append
+        }
+        
+        # Create Lifecycle Management worksheet
+        Write-AuditLog -Message "  Creating Lifecycle Management worksheet..." -Level Info
+        if ($AuditData.TeamsLifecycle -and $AuditData.TeamsLifecycle.ExpirationPolicy) {
+            $lifecycleData = @(
+                [PSCustomObject]@{
+                    Setting = "Group Lifetime (Days)"
+                    Value = $AuditData.TeamsLifecycle.ExpirationPolicy.GroupLifetimeInDays
+                    Recommendation = "Set to 180-365 days based on organizational requirements"
+                }
+                [PSCustomObject]@{
+                    Setting = "Managed Group Types"
+                    Value = $AuditData.TeamsLifecycle.ExpirationPolicy.ManagedGroupTypes
+                    Recommendation = "Apply to 'All' groups for comprehensive lifecycle management"
+                }
+            )
+            
+            $lifecycleData | Export-Excel -Path $reportPath -WorksheetName "Lifecycle Management" -AutoSize -TableName "LifecycleManagement" -TableStyle Medium2 -Append
+        }
+        
+        # Create Guest Access worksheet
+        Write-AuditLog -Message "  Creating Guest Access worksheet..." -Level Info
+        if ($AuditData.TeamsGovernance -and $AuditData.TeamsGovernance.GuestAccess) {
+            $guestAccessData = @()
+            $guestAccess = $AuditData.TeamsGovernance.GuestAccess
+            
+            foreach ($key in $guestAccess.Keys) {
+                $guestAccessData += [PSCustomObject]@{
+                    Setting = $key
+                    Value = [string]$guestAccess[$key]
+                    Category = switch -Wildcard ($key) {
+                        "*Chat*" { "Messaging" }
+                        "*Giphy*" { "Messaging" }
+                        "*Meme*" { "Messaging" }
+                        "*Sticker*" { "Messaging" }
+                        "*Video*" { "Meeting" }
+                        "*Screen*" { "Meeting" }
+                        "*Meet*" { "Meeting" }
+                        "*Call*" { "Calling" }
+                        default { "General" }
+                    }
+                }
+            }
+            
+            $guestAccessData | Export-Excel -Path $reportPath -WorksheetName "Guest Access" -AutoSize -TableName "GuestAccess" -TableStyle Medium2 -Append
+        }
+        
+        # Create App Catalog worksheet
+        Write-AuditLog -Message "  Creating App Catalog worksheet..." -Level Info
+        if ($AuditData.TeamsAppManagement -and $AuditData.TeamsAppManagement.AppCatalog) {
+            $appCatalogData = foreach ($app in $AuditData.TeamsAppManagement.AppCatalog) {
+                [PSCustomObject]@{
+                    DisplayName = $app.DisplayName
+                    DistributionMethod = $app.DistributionMethod
+                    ExternalId = $app.ExternalId
+                }
+            }
+            
+            $appCatalogData | Export-Excel -Path $reportPath -WorksheetName "App Catalog" -AutoSize -TableName "AppCatalog" -TableStyle Medium2 -Append
+        }
+        
+        # Create Teams Phone - Voice Routing worksheet
+        Write-AuditLog -Message "  Creating Teams Phone worksheets..." -Level Info
+        if ($AuditData.TeamsPhone) {
+            # Voice Routing Policies
+            if ($AuditData.TeamsPhone.OnlineVoiceRoutingPolicies -and $AuditData.TeamsPhone.OnlineVoiceRoutingPolicies.Count -gt 0) {
+                $voiceRoutingData = foreach ($policy in $AuditData.TeamsPhone.OnlineVoiceRoutingPolicies) {
+                    [PSCustomObject]@{
+                        Identity = $policy.Identity
+                        Description = $policy.Description
+                        OnlinePstnUsages = ($policy.OnlinePstnUsages -join ", ")
+                        RouteType = $policy.RouteType
+                    }
+                }
+                $voiceRoutingData | Export-Excel -Path $reportPath -WorksheetName "Voice Routing Policies" -AutoSize -TableName "VoiceRoutingPolicies" -TableStyle Medium2 -Append
+            }
+            
+            # Voice Routes
+            if ($AuditData.TeamsPhone.OnlineVoiceRoutes -and $AuditData.TeamsPhone.OnlineVoiceRoutes.Count -gt 0) {
+                $voiceRoutesData = foreach ($route in $AuditData.TeamsPhone.OnlineVoiceRoutes) {
+                    [PSCustomObject]@{
+                        Identity = $route.Identity
+                        Description = $route.Description
+                        NumberPattern = $route.NumberPattern
+                        Priority = $route.Priority
+                        OnlinePstnUsages = ($route.OnlinePstnUsages -join ", ")
+                        OnlinePstnGatewayList = ($route.OnlinePstnGatewayList -join ", ")
+                    }
+                }
+                $voiceRoutesData | Export-Excel -Path $reportPath -WorksheetName "Voice Routes" -AutoSize -TableName "VoiceRoutes" -TableStyle Medium2 -Append
+            }
+            
+            # Dial Plans
+            if ($AuditData.TeamsPhone.TenantDialPlans -and $AuditData.TeamsPhone.TenantDialPlans.Count -gt 0) {
+                $dialPlansData = foreach ($plan in $AuditData.TeamsPhone.TenantDialPlans) {
+                    [PSCustomObject]@{
+                        Identity = $plan.Identity
+                        SimpleName = $plan.SimpleName
+                        Description = $plan.Description
+                        NormalizationRulesCount = if ($plan.NormalizationRules) { $plan.NormalizationRules.Count } else { 0 }
+                        ExternalAccessPrefix = $plan.ExternalAccessPrefix
+                        OptimizeDeviceDialing = $plan.OptimizeDeviceDialing
+                    }
+                }
+                $dialPlansData | Export-Excel -Path $reportPath -WorksheetName "Dial Plans" -AutoSize -TableName "DialPlans" -TableStyle Medium2 -Append
+            }
+            
+            # PSTN Gateways (SBCs)
+            if ($AuditData.TeamsPhone.OnlinePSTNGateways -and $AuditData.TeamsPhone.OnlinePSTNGateways.Count -gt 0) {
+                $gatewaysData = foreach ($gw in $AuditData.TeamsPhone.OnlinePSTNGateways) {
+                    [PSCustomObject]@{
+                        Identity = $gw.Identity
+                        Fqdn = $gw.Fqdn
+                        SipSignalingPort = $gw.SipSignalingPort
+                        Enabled = $gw.Enabled
+                        MaxConcurrentSessions = $gw.MaxConcurrentSessions
+                        MediaBypass = $gw.MediaBypass
+                        BypassMode = $gw.BypassMode
+                        GatewaySiteId = $gw.GatewaySiteId
+                        GatewaySiteLbrEnabled = $gw.GatewaySiteLbrEnabled
+                        FailoverTimeSeconds = $gw.FailoverTimeSeconds
+                    }
+                }
+                $gatewaysData | Export-Excel -Path $reportPath -WorksheetName "PSTN Gateways" -AutoSize -TableName "PSTNGateways" -TableStyle Medium2 -Append
+            }
+            
+            # Call Queues
+            if ($AuditData.TeamsPhone.CallQueues -and $AuditData.TeamsPhone.CallQueues.Count -gt 0) {
+                $callQueuesData = foreach ($queue in $AuditData.TeamsPhone.CallQueues) {
+                    [PSCustomObject]@{
+                        Name = $queue.Name
+                        RoutingMethod = $queue.RoutingMethod
+                        AgentAlertTime = $queue.AgentAlertTime
+                        AllowOptOut = $queue.AllowOptOut
+                        ConferenceMode = $queue.ConferenceMode
+                        PresenceBasedRouting = $queue.PresenceBasedRouting
+                        OverflowThreshold = $queue.OverflowThreshold
+                        TimeoutThreshold = $queue.TimeoutThreshold
+                        OverflowAction = $queue.OverflowAction
+                        TimeoutAction = $queue.TimeoutAction
+                        AgentCount = $queue.Agents
+                    }
+                }
+                $callQueuesData | Export-Excel -Path $reportPath -WorksheetName "Call Queues" -AutoSize -TableName "CallQueues" -TableStyle Medium2 -Append
+            }
+            
+            # Auto Attendants
+            if ($AuditData.TeamsPhone.AutoAttendants -and $AuditData.TeamsPhone.AutoAttendants.Count -gt 0) {
+                $autoAttendantsData = foreach ($aa in $AuditData.TeamsPhone.AutoAttendants) {
+                    [PSCustomObject]@{
+                        Name = $aa.Name
+                        LanguageId = $aa.LanguageId
+                        TimeZoneId = $aa.TimeZoneId
+                        VoiceResponseEnabled = $aa.VoiceResponseEnabled
+                        OperatorType = $aa.OperatorType
+                        DefaultCallFlowName = $aa.DefaultCallFlowName
+                        CallFlowsCount = $aa.CallFlowsCount
+                        SchedulesCount = $aa.SchedulesCount
+                    }
+                }
+                $autoAttendantsData | Export-Excel -Path $reportPath -WorksheetName "Auto Attendants" -AutoSize -TableName "AutoAttendants" -TableStyle Medium2 -Append
+            }
+            
+            # Resource Accounts
+            if ($AuditData.TeamsPhone.ResourceAccounts -and $AuditData.TeamsPhone.ResourceAccounts.Count -gt 0) {
+                $resourceAccountsData = foreach ($ra in $AuditData.TeamsPhone.ResourceAccounts) {
+                    [PSCustomObject]@{
+                        DisplayName = $ra.DisplayName
+                        UserPrincipalName = $ra.UserPrincipalName
+                        PhoneNumber = $ra.PhoneNumber
+                        ApplicationId = $ra.ApplicationId
+                    }
+                }
+                $resourceAccountsData | Export-Excel -Path $reportPath -WorksheetName "Resource Accounts" -AutoSize -TableName "ResourceAccounts" -TableStyle Medium2 -Append
+            }
+            
+            # Calling Policies
+            if ($AuditData.TeamsPhone.CallingPolicies -and $AuditData.TeamsPhone.CallingPolicies.Count -gt 0) {
+                $callingPoliciesData = foreach ($policy in $AuditData.TeamsPhone.CallingPolicies) {
+                    [PSCustomObject]@{
+                        Identity = $policy.Identity
+                        AllowPrivateCalling = $policy.AllowPrivateCalling
+                        AllowVoicemail = $policy.AllowVoicemail
+                        AllowCallGroups = $policy.AllowCallGroups
+                        AllowDelegation = $policy.AllowDelegation
+                        AllowCallForwardingToUser = $policy.AllowCallForwardingToUser
+                        AllowCallForwardingToPhone = $policy.AllowCallForwardingToPhone
+                        PreventTollBypass = $policy.PreventTollBypass
+                        BusyOnBusyEnabledType = $policy.BusyOnBusyEnabledType
+                        AllowCloudRecordingForCalls = $policy.AllowCloudRecordingForCalls
+                        AllowTranscriptionForCalling = $policy.AllowTranscriptionForCalling
+                        SpamFilteringEnabledType = $policy.SpamFilteringEnabledType
+                    }
+                }
+                $callingPoliciesData | Export-Excel -Path $reportPath -WorksheetName "Calling Policies" -AutoSize -TableName "CallingPolicies" -TableStyle Medium2 -Append
+            }
+            
+            # Emergency Calling Policies
+            if ($AuditData.TeamsPhone.EmergencyCallingPolicies -and $AuditData.TeamsPhone.EmergencyCallingPolicies.Count -gt 0) {
+                $emergencyData = foreach ($policy in $AuditData.TeamsPhone.EmergencyCallingPolicies) {
+                    [PSCustomObject]@{
+                        Identity = $policy.Identity
+                        Description = $policy.Description
+                        NotificationGroup = $policy.NotificationGroup
+                        NotificationDialOutNumber = $policy.NotificationDialOutNumber
+                        NotificationMode = $policy.NotificationMode
+                        ExternalLocationLookupMode = $policy.ExternalLocationLookupMode
+                    }
+                }
+                $emergencyData | Export-Excel -Path $reportPath -WorksheetName "Emergency Calling" -AutoSize -TableName "EmergencyCalling" -TableStyle Medium2 -Append
+            }
+            
+            # Network Sites
+            if ($AuditData.TeamsPhone.NetworkSites -and $AuditData.TeamsPhone.NetworkSites.Count -gt 0) {
+                $networkSitesData = foreach ($site in $AuditData.TeamsPhone.NetworkSites) {
+                    [PSCustomObject]@{
+                        Identity = $site.Identity
+                        Description = $site.Description
+                        NetworkRegionID = $site.NetworkRegionID
+                        EnableLocationBasedRouting = $site.EnableLocationBasedRouting
+                        EmergencyCallingPolicy = $site.EmergencyCallingPolicy
+                        EmergencyCallRoutingPolicy = $site.EmergencyCallRoutingPolicy
+                    }
+                }
+                $networkSitesData | Export-Excel -Path $reportPath -WorksheetName "Network Sites" -AutoSize -TableName "NetworkSites" -TableStyle Medium2 -Append
+            }
+            
+            # Phone Number Assignments
+            if ($AuditData.TeamsPhone.PhoneNumberAssignments -and $AuditData.TeamsPhone.PhoneNumberAssignments.Count -gt 0) {
+                $phoneNumbersData = foreach ($num in $AuditData.TeamsPhone.PhoneNumberAssignments) {
+                    [PSCustomObject]@{
+                        TelephoneNumber = $num.TelephoneNumber
+                        NumberType = $num.NumberType
+                        AssignmentCategory = $num.AssignmentCategory
+                        Capability = $num.Capability
+                        ActivationState = $num.ActivationState
+                        City = $num.City
+                        IsoCountryCode = $num.IsoCountryCode
+                    }
+                }
+                $phoneNumbersData | Export-Excel -Path $reportPath -WorksheetName "Phone Numbers" -AutoSize -TableName "PhoneNumbers" -TableStyle Medium2 -Append
+            }
+            
+            # Voicemail Policies
+            if ($AuditData.TeamsPhone.VoicemailPolicies -and $AuditData.TeamsPhone.VoicemailPolicies.Count -gt 0) {
+                $voicemailData = foreach ($policy in $AuditData.TeamsPhone.VoicemailPolicies) {
+                    [PSCustomObject]@{
+                        Identity = $policy.Identity
+                        EnableTranscription = $policy.EnableTranscription
+                        EnableTranscriptionProfanityMasking = $policy.EnableTranscriptionProfanityMasking
+                        EnableTranscriptionTranslation = $policy.EnableTranscriptionTranslation
+                        MaximumRecordingLength = $policy.MaximumRecordingLength
+                        PrimarySystemPromptLanguage = $policy.PrimarySystemPromptLanguage
+                    }
+                }
+                $voicemailData | Export-Excel -Path $reportPath -WorksheetName "Voicemail Policies" -AutoSize -TableName "VoicemailPolicies" -TableStyle Medium2 -Append
+            }
+            
+            # Caller ID Policies
+            if ($AuditData.TeamsPhone.CallerIDPolicies -and $AuditData.TeamsPhone.CallerIDPolicies.Count -gt 0) {
+                $callerIdData = foreach ($policy in $AuditData.TeamsPhone.CallerIDPolicies) {
+                    [PSCustomObject]@{
+                        Identity = $policy.Identity
+                        Description = $policy.Description
+                        CallingIDSubstitute = $policy.CallingIDSubstitute
+                        EnableUserOverride = $policy.EnableUserOverride
+                        BlockIncomingPstnCallerID = $policy.BlockIncomingPstnCallerID
+                        CompanyName = $policy.CompanyName
+                    }
+                }
+                $callerIdData | Export-Excel -Path $reportPath -WorksheetName "Caller ID Policies" -AutoSize -TableName "CallerIDPolicies" -TableStyle Medium2 -Append
+            }
+            
+            # Call Park Policies
+            if ($AuditData.TeamsPhone.CallParkPolicies -and $AuditData.TeamsPhone.CallParkPolicies.Count -gt 0) {
+                $callParkData = foreach ($policy in $AuditData.TeamsPhone.CallParkPolicies) {
+                    [PSCustomObject]@{
+                        Identity = $policy.Identity
+                        Description = $policy.Description
+                        AllowCallPark = $policy.AllowCallPark
+                        PickupRangeStart = $policy.PickupRangeStart
+                        PickupRangeEnd = $policy.PickupRangeEnd
+                        ParkTimeoutSeconds = $policy.ParkTimeoutSeconds
+                    }
+                }
+                $callParkData | Export-Excel -Path $reportPath -WorksheetName "Call Park Policies" -AutoSize -TableName "CallParkPolicies" -TableStyle Medium2 -Append
+            }
+            
+            # Mobility Policies
+            if ($AuditData.TeamsPhone.MobilityPolicies -and $AuditData.TeamsPhone.MobilityPolicies.Count -gt 0) {
+                $mobilityData = foreach ($policy in $AuditData.TeamsPhone.MobilityPolicies) {
+                    [PSCustomObject]@{
+                        Identity = $policy.Identity
+                        Description = $policy.Description
+                        IPVideoMobileMode = $policy.IPVideoMobileMode
+                        IPAudioMobileMode = $policy.IPAudioMobileMode
+                        MobileDialerPreference = $policy.MobileDialerPreference
+                    }
+                }
+                $mobilityData | Export-Excel -Path $reportPath -WorksheetName "Mobility Policies" -AutoSize -TableName "MobilityPolicies" -TableStyle Medium2 -Append
+            }
+            
+            # Compliance Recording Policies
+            if ($AuditData.TeamsPhone.ComplianceRecordingPolicies -and $AuditData.TeamsPhone.ComplianceRecordingPolicies.Count -gt 0) {
+                $complianceData = foreach ($policy in $AuditData.TeamsPhone.ComplianceRecordingPolicies) {
+                    [PSCustomObject]@{
+                        Identity = $policy.Identity
+                        Description = $policy.Description
+                        Enabled = $policy.Enabled
+                        WarnUserOnRemoval = $policy.WarnUserOnRemoval
+                    }
+                }
+                $complianceData | Export-Excel -Path $reportPath -WorksheetName "Compliance Recording" -AutoSize -TableName "ComplianceRecording" -TableStyle Medium2 -Append
+            }
+        }
+        
+        # Create Teams Devices worksheets
+        Write-AuditLog -Message "  Creating Teams Devices worksheets..." -Level Info
+        if ($AuditData.TeamsDevices) {
+            # IP Phone Policies
+            if ($AuditData.TeamsDevices.IPPhonePolicies -and $AuditData.TeamsDevices.IPPhonePolicies.Count -gt 0) {
+                $ipPhoneData = foreach ($policy in $AuditData.TeamsDevices.IPPhonePolicies) {
+                    [PSCustomObject]@{
+                        Identity = $policy.Identity
+                        Description = $policy.Description
+                        SignInMode = $policy.SignInMode
+                        AllowHomeScreen = $policy.AllowHomeScreen
+                        AllowBetterTogether = $policy.AllowBetterTogether
+                        AllowHotDesking = $policy.AllowHotDesking
+                        HotDeskingIdleTimeoutInMinutes = $policy.HotDeskingIdleTimeoutInMinutes
+                        SearchOnCommonAreaPhoneMode = $policy.SearchOnCommonAreaPhoneMode
+                    }
+                }
+                $ipPhoneData | Export-Excel -Path $reportPath -WorksheetName "IP Phone Policies" -AutoSize -TableName "IPPhonePolicies" -TableStyle Medium2 -Append
+            }
+            
+            # Shared Calling Policies
+            if ($AuditData.TeamsDevices.SharedCallingPolicies -and $AuditData.TeamsDevices.SharedCallingPolicies.Count -gt 0) {
+                $sharedCallingData = foreach ($policy in $AuditData.TeamsDevices.SharedCallingPolicies) {
+                    [PSCustomObject]@{
+                        Identity = $policy.Identity
+                        Description = $policy.Description
+                        ResourceAccount = $policy.ResourceAccount
+                        EmergencyNumbers = ($policy.EmergencyNumbers -join ", ")
+                    }
+                }
+                $sharedCallingData | Export-Excel -Path $reportPath -WorksheetName "Shared Calling Policies" -AutoSize -TableName "SharedCallingPolicies" -TableStyle Medium2 -Append
+            }
+            
+            # Teams Room Accounts
+            if ($AuditData.TeamsDevices.TeamsRoomAccounts -and $AuditData.TeamsDevices.TeamsRoomAccounts.Count -gt 0) {
+                $roomAccountsData = foreach ($account in $AuditData.TeamsDevices.TeamsRoomAccounts) {
+                    [PSCustomObject]@{
+                        DisplayName = $account.DisplayName
+                        UserPrincipalName = $account.UserPrincipalName
+                        SipAddress = $account.SipAddress
+                        AccountType = $account.AccountType
+                        InterpretedUserType = $account.InterpretedUserType
+                        TeamsUpgradeEffectiveMode = $account.TeamsUpgradeEffectiveMode
+                    }
+                }
+                $roomAccountsData | Export-Excel -Path $reportPath -WorksheetName "Teams Room Accounts" -AutoSize -TableName "TeamsRoomAccounts" -TableStyle Medium2 -Append
+            }
+            
+            # Common Area Phone Accounts
+            if ($AuditData.TeamsDevices.CommonAreaPhoneAccounts -and $AuditData.TeamsDevices.CommonAreaPhoneAccounts.Count -gt 0) {
+                $capAccountsData = foreach ($account in $AuditData.TeamsDevices.CommonAreaPhoneAccounts) {
+                    [PSCustomObject]@{
+                        DisplayName = $account.DisplayName
+                        UserPrincipalName = $account.UserPrincipalName
+                        SipAddress = $account.SipAddress
+                        LineUri = $account.LineUri
+                        InterpretedUserType = $account.InterpretedUserType
+                        TeamsUpgradeEffectiveMode = $account.TeamsUpgradeEffectiveMode
+                    }
+                }
+                $capAccountsData | Export-Excel -Path $reportPath -WorksheetName "Common Area Phones" -AutoSize -TableName "CommonAreaPhones" -TableStyle Medium2 -Append
+            }
+            
+            # Device Statistics Summary
+            if ($AuditData.TeamsDevices.Statistics) {
+                $deviceStatsData = @(
+                    [PSCustomObject]@{ DeviceType = "Teams Rooms (Windows)"; Count = $AuditData.TeamsDevices.Statistics.TotalTeamsRoomsWindows }
+                    [PSCustomObject]@{ DeviceType = "Teams Rooms (Android)"; Count = $AuditData.TeamsDevices.Statistics.TotalTeamsRoomsAndroid }
+                    [PSCustomObject]@{ DeviceType = "Teams Phone Devices"; Count = $AuditData.TeamsDevices.Statistics.TotalTeamsPhoneDevices }
+                    [PSCustomObject]@{ DeviceType = "Teams Displays"; Count = $AuditData.TeamsDevices.Statistics.TotalTeamsDisplays }
+                    [PSCustomObject]@{ DeviceType = "Teams Panels"; Count = $AuditData.TeamsDevices.Statistics.TotalTeamsPanels }
+                    [PSCustomObject]@{ DeviceType = "Surface Hubs"; Count = $AuditData.TeamsDevices.Statistics.TotalSurfaceHubs }
+                    [PSCustomObject]@{ DeviceType = "Collaboration Bars"; Count = $AuditData.TeamsDevices.Statistics.TotalCollaborationBars }
+                    [PSCustomObject]@{ DeviceType = "SIP Devices"; Count = $AuditData.TeamsDevices.Statistics.TotalSIPDevices }
+                    [PSCustomObject]@{ DeviceType = "Teams Room Accounts"; Count = $AuditData.TeamsDevices.Statistics.TotalTeamsRoomAccounts }
+                    [PSCustomObject]@{ DeviceType = "Common Area Phone Accounts"; Count = $AuditData.TeamsDevices.Statistics.TotalCommonAreaPhoneAccounts }
+                )
+                $deviceStatsData | Export-Excel -Path $reportPath -WorksheetName "Device Statistics" -AutoSize -TableName "DeviceStatistics" -TableStyle Medium2 -Append
+            }
+        }
+        
+        Write-AuditLog -Message "  Excel report generated: $reportPath" -Level Success
+        return $reportPath
+    }
+    catch {
+        Write-AuditLog -Message "  Error generating Excel report: $($_.Exception.Message)" -Level Error
+        throw
+    }
+}
+#endregion
+
+#region Main Execution Function
+function Invoke-TeamsComplianceAudit {
+    <#
+    .SYNOPSIS
+        Main function that orchestrates the Teams compliance audit.
+    .DESCRIPTION
+        Coordinates all audit activities including module validation, authentication,
+        data collection, and report generation.
+    #>
+    [CmdletBinding()]
+    param()
+    
+    # Display script banner
+    $banner = @"
+
+================================================================================
+    Microsoft Teams Tenant Compliance Audit
+    Version: $($script:ScriptVersion)
+    Author: Kelvin Chigorimbo
+================================================================================
+
+"@
+    Write-Host $banner -ForegroundColor Cyan
+    
+    # Initialize logging
+    if (-not (Initialize-LogFile)) {
+        Write-Host "Failed to initialize logging. Exiting." -ForegroundColor Red
+        return
+    }
+    
+    Write-AuditLog -Message "Starting Microsoft Teams Tenant Compliance Audit..." -Level Header
+    Write-AuditLog -Message "Output Path: $OutputPath" -Level Info
+    
+    # Step 1: Validate required modules
+    Write-AuditLog -Message "" -Level Info
+    Write-AuditLog -Message "STEP 1: Validating Prerequisites" -Level Header
+    Write-AuditLog -Message "================================" -Level Info
+    
+    if (-not (Test-RequiredModules)) {
+        Write-AuditLog -Message "Module validation failed. Please install required modules and try again." -Level Error
+        return
+    }
+    
+    # Step 2: Import required modules
+    Write-AuditLog -Message "" -Level Info
+    Write-AuditLog -Message "STEP 2: Importing Modules" -Level Header
+    Write-AuditLog -Message "=========================" -Level Info
+    
+    if (-not (Import-RequiredModules)) {
+        Write-AuditLog -Message "Module import failed. Please check module installations." -Level Error
+        return
+    }
+    
+    # Step 3: Connect to Microsoft services
+    Write-AuditLog -Message "" -Level Info
+    Write-AuditLog -Message "STEP 3: Connecting to Microsoft Services" -Level Header
+    Write-AuditLog -Message "=========================================" -Level Info
+    
+    if (-not (Connect-AuditServices)) {
+        Write-AuditLog -Message "Failed to connect to required services. Please check credentials and permissions." -Level Error
+        return
+    }
+    
+    # Step 4: Collect audit data
+    Write-AuditLog -Message "" -Level Info
+    Write-AuditLog -Message "STEP 4: Collecting Audit Data" -Level Header
+    Write-AuditLog -Message "=============================" -Level Info
+    
+    $totalSections = 13
+    $currentSection = 0
+    
+    # Collect Teams data
+    $currentSection++
+    Write-Progress -Activity "Collecting Audit Data" -Status "Section $currentSection of $totalSections - Teams" -PercentComplete (($currentSection / $totalSections) * 100)
+    $script:AuditResults.Teams = Get-TeamsAuditData
+    
+    # Collect Teams Settings
+    $currentSection++
+    Write-Progress -Activity "Collecting Audit Data" -Status "Section $currentSection of $totalSections - Teams Settings" -PercentComplete (($currentSection / $totalSections) * 100)
+    $script:AuditResults.TeamsSettings = Get-TeamsSettingsAuditData
+    
+    # Collect Teams Policies
+    $currentSection++
+    Write-Progress -Activity "Collecting Audit Data" -Status "Section $currentSection of $totalSections - Teams Policies" -PercentComplete (($currentSection / $totalSections) * 100)
+    $script:AuditResults.TeamsPolicies = Get-TeamsPoliciesAuditData
+    
+    # Collect Teams Update Policies
+    $currentSection++
+    Write-Progress -Activity "Collecting Audit Data" -Status "Section $currentSection of $totalSections - Update Policies" -PercentComplete (($currentSection / $totalSections) * 100)
+    $script:AuditResults.TeamsUpdatePolicies = Get-TeamsUpdatePoliciesAuditData
+    
+    # Collect Teams Upgrade Settings
+    $currentSection++
+    Write-Progress -Activity "Collecting Audit Data" -Status "Section $currentSection of $totalSections - Upgrade Settings" -PercentComplete (($currentSection / $totalSections) * 100)
+    $script:AuditResults.TeamsUpgradeSettings = Get-TeamsUpgradeSettingsAuditData
+    
+    # Collect Teams Devices
+    $currentSection++
+    Write-Progress -Activity "Collecting Audit Data" -Status "Section $currentSection of $totalSections - Devices" -PercentComplete (($currentSection / $totalSections) * 100)
+    $script:AuditResults.TeamsDevices = Get-TeamsDevicesAuditData
+    
+    # Collect Teams App Management
+    $currentSection++
+    Write-Progress -Activity "Collecting Audit Data" -Status "Section $currentSection of $totalSections - App Management" -PercentComplete (($currentSection / $totalSections) * 100)
+    $script:AuditResults.TeamsAppManagement = Get-TeamsAppManagementAuditData
+    
+    # Collect Teams Meetings
+    $currentSection++
+    Write-Progress -Activity "Collecting Audit Data" -Status "Section $currentSection of $totalSections - Meetings" -PercentComplete (($currentSection / $totalSections) * 100)
+    $script:AuditResults.TeamsMeetings = Get-TeamsMeetingsAuditData
+    
+    # Collect Teams Messaging
+    $currentSection++
+    Write-Progress -Activity "Collecting Audit Data" -Status "Section $currentSection of $totalSections - Messaging" -PercentComplete (($currentSection / $totalSections) * 100)
+    $script:AuditResults.TeamsMessaging = Get-TeamsMessagingAuditData
+    
+    # Collect Teams Encryption
+    $currentSection++
+    Write-Progress -Activity "Collecting Audit Data" -Status "Section $currentSection of $totalSections - Encryption" -PercentComplete (($currentSection / $totalSections) * 100)
+    $script:AuditResults.TeamsEncryption = Get-TeamsEncryptionAuditData
+    
+    # Collect Teams Phone (Voice) Data
+    $currentSection++
+    Write-Progress -Activity "Collecting Audit Data" -Status "Section $currentSection of $totalSections - Teams Phone" -PercentComplete (($currentSection / $totalSections) * 100)
+    $script:AuditResults.TeamsPhone = Get-TeamsPhoneAuditData
+    
+    # Collect Governance Data
+    $currentSection++
+    Write-Progress -Activity "Collecting Audit Data" -Status "Section $currentSection of $totalSections - Governance" -PercentComplete (($currentSection / $totalSections) * 100)
+    $script:AuditResults.TeamsGovernance = Get-TeamsGovernanceAuditData
+    
+    # Collect Lifecycle Data
+    Write-AuditLog -Message "" -Level Info
+    Write-Progress -Activity "Collecting Audit Data" -Status "Lifecycle Management" -PercentComplete 95
+    $script:AuditResults.TeamsLifecycle = Get-TeamsLifecycleAuditData
+    
+    # Collect Security Data
+    Write-Progress -Activity "Collecting Audit Data" -Status "Security and Compliance" -PercentComplete 98
+    $script:AuditResults.TeamsSecurity = Get-TeamsSecurityComplianceAuditData
+    
+    # Add audit metadata
+    $script:AuditResults.AuditMetadata = @{
+        StartTime = $script:StartTime
+        EndTime = Get-Date
+        ScriptVersion = $script:ScriptVersion
+        Author = "Kelvin Chigorimbo"
+    }
+    
+    Write-Progress -Activity "Collecting Audit Data" -Completed
+    
+    # Step 5: Generate reports
+    Write-AuditLog -Message "" -Level Info
+    Write-AuditLog -Message "STEP 5: Generating Reports" -Level Header
+    Write-AuditLog -Message "==========================" -Level Info
+    
+    # Get best practices reference data
+    $bestPractices = Get-BestPracticesReference
+    
+    # Generate Excel report
+    try {
+        $excelReportPath = New-TeamsAuditExcelReport -AuditData $script:AuditResults -BestPractices $bestPractices -OutputPath $OutputPath
+        Write-AuditLog -Message "Excel report generated: $excelReportPath" -Level Success
+    }
+    catch {
+        Write-AuditLog -Message "Failed to generate Excel report: $($_.Exception.Message)" -Level Error
+    }
+    
+    # Note about Word report
+    Write-AuditLog -Message "" -Level Info
+    Write-AuditLog -Message "Note: Word report generation requires Node.js and the docx npm package." -Level Info
+    Write-AuditLog -Message "To generate Word report, install Node.js and run: npm install -g docx" -Level Info
+    
+    # Step 6: Disconnect and cleanup
+    Write-AuditLog -Message "" -Level Info
+    Write-AuditLog -Message "STEP 6: Cleanup" -Level Header
+    Write-AuditLog -Message "===============" -Level Info
+    
+    Disconnect-AuditServices
+    
+    # Final summary
+    $endTime = Get-Date
+    $duration = $endTime - $script:StartTime
+    
+    Write-AuditLog -Message "" -Level Info
+    Write-AuditLog -Message "=================================================================================" -Level Header
+    Write-AuditLog -Message "AUDIT COMPLETE" -Level Header
+    Write-AuditLog -Message "=================================================================================" -Level Header
+    Write-AuditLog -Message "" -Level Info
+    Write-AuditLog -Message "Duration: $($duration.ToString('hh\:mm\:ss'))" -Level Info
+    Write-AuditLog -Message "Errors: $($script:ErrorCount)" -Level $(if ($script:ErrorCount -gt 0) { "Error" } else { "Success" })
+    Write-AuditLog -Message "Warnings: $($script:WarningCount)" -Level $(if ($script:WarningCount -gt 0) { "Warning" } else { "Success" })
+    Write-AuditLog -Message "" -Level Info
+    Write-AuditLog -Message "Output Files:" -Level Info
+    Write-AuditLog -Message "  Log File: $($script:LogFile)" -Level Info
+    if ($excelReportPath) {
+        Write-AuditLog -Message "  Excel Report: $excelReportPath" -Level Info
+    }
+    Write-AuditLog -Message "" -Level Info
+    Write-AuditLog -Message "Review the reports for detailed findings and recommendations." -Level Info
+    
+    # Return results for programmatic use
+    return @{
+        AuditData = $script:AuditResults
+        LogFile = $script:LogFile
+        ExcelReport = $excelReportPath
+        Duration = $duration
+        ErrorCount = $script:ErrorCount
+        WarningCount = $script:WarningCount
+    }
+}
+#endregion
+
+#region Script Entry Point
+# Execute the main audit function when script is run
+try {
+    $results = Invoke-TeamsComplianceAudit
+    
+    # Output final results
+    if ($results) {
+        Write-Host "`nAudit completed successfully. Check the output files for details." -ForegroundColor Green
+    }
+}
+catch {
+    Write-Host "`nAudit failed with error: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "Check the log file for details: $($script:LogFile)" -ForegroundColor Yellow
+    
+    # Ensure cleanup happens even on failure
+    try {
+        Disconnect-AuditServices
+    }
+    catch { }
+}
+#endregion
