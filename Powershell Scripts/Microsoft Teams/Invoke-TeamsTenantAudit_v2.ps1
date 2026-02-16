@@ -58,7 +58,7 @@
     
 .NOTES
     Script Name    : Invoke-TeamsComplianceAudit.ps1
-    Version        : 1.0.0
+    Version        : 2.0.0
     Author         : Kelvin Chigorimbo
     Creation Date  : February 2026
     
@@ -69,7 +69,6 @@
     - Microsoft.Graph.Identity.DirectoryManagement
     - Microsoft.Graph.Identity.Governance
     - Microsoft.Graph.DeviceManagement
-    - ExchangeOnlineManagement
     - ImportExcel
     
     Required Permissions (Microsoft Graph):
@@ -249,7 +248,7 @@ function Test-RequiredModules {
     .SYNOPSIS
         Validates that all required PowerShell modules are installed and available.
     .DESCRIPTION
-        Checks for the presence of required modules for Teams, Graph API, Exchange,
+        Checks for the presence of required modules for Teams, Graph API,
         and Excel export functionality. Reports missing modules with installation guidance.
     .OUTPUTS
         Returns $true if all required modules are available, $false otherwise.
@@ -267,7 +266,6 @@ function Test-RequiredModules {
         @{ Name = "Microsoft.Graph.Identity.DirectoryManagement"; MinVersion = $null }
         @{ Name = "Microsoft.Graph.Identity.Governance"; MinVersion = $null }
         @{ Name = "Microsoft.Graph.DeviceManagement"; MinVersion = $null }
-        @{ Name = "ExchangeOnlineManagement"; MinVersion = "3.0.0" }
         @{ Name = "ImportExcel"; MinVersion = $null }
     )
     
@@ -319,7 +317,7 @@ function Import-RequiredModules {
         Imports all required PowerShell modules into the current session.
     .DESCRIPTION
         Loads the necessary modules for Teams administration, Microsoft Graph API,
-        Exchange Online management, and Excel export functionality.
+        and Excel export functionality.
     .OUTPUTS
         Returns $true if all modules imported successfully, $false otherwise.
     #>
@@ -335,7 +333,6 @@ function Import-RequiredModules {
         "Microsoft.Graph.Identity.DirectoryManagement"
         "Microsoft.Graph.Identity.Governance"
         "Microsoft.Graph.DeviceManagement"
-        "ExchangeOnlineManagement"
         "ImportExcel"
     )
     
@@ -379,7 +376,7 @@ function Connect-AuditServices {
     .SYNOPSIS
         Establishes connections to all required Microsoft services for the audit.
     .DESCRIPTION
-        Connects to Microsoft Teams, Microsoft Graph API, and Exchange Online
+        Connects to Microsoft Teams and Microsoft Graph API
         using the specified authentication method (interactive or app-based).
     .OUTPUTS
         Returns $true if all connections established successfully, $false otherwise.
@@ -457,28 +454,6 @@ function Connect-AuditServices {
         $connectionSuccess = $false
     }
     
-    # Connect to Exchange Online
-    Write-AuditLog -Message "Connecting to Exchange Online..." -Level Info
-    try {
-        if ($Interactive) {
-            if ($TenantId) {
-                Connect-ExchangeOnline -Organization $TenantId -ShowBanner:$false -ErrorAction Stop
-            }
-            else {
-                Connect-ExchangeOnline -ShowBanner:$false -ErrorAction Stop
-            }
-        }
-        elseif ($CertificateThumbprint) {
-            Connect-ExchangeOnline -Organization $TenantId -AppId $ClientId `
-                                  -CertificateThumbprint $CertificateThumbprint -ShowBanner:$false -ErrorAction Stop
-        }
-        Write-AuditLog -Message "  Connected to Exchange Online successfully." -Level Success
-    }
-    catch {
-        Write-AuditLog -Message "  Warning: Could not connect to Exchange Online: $($_.Exception.Message)" -Level Warning
-        Write-AuditLog -Message "  Some audit data may be unavailable." -Level Warning
-    }
-    
     return $connectionSuccess
 }
 
@@ -487,7 +462,7 @@ function Disconnect-AuditServices {
     .SYNOPSIS
         Disconnects from all Microsoft services used during the audit.
     .DESCRIPTION
-        Cleanly terminates connections to Microsoft Teams, Graph API, and Exchange Online
+        Cleanly terminates connections to Microsoft Teams and Graph API
         to release resources and clear authentication tokens.
     #>
     [CmdletBinding()]
@@ -504,12 +479,6 @@ function Disconnect-AuditServices {
     try {
         Disconnect-MgGraph -ErrorAction SilentlyContinue
         Write-AuditLog -Message "  Disconnected from Microsoft Graph." -Level Info
-    }
-    catch { }
-    
-    try {
-        Disconnect-ExchangeOnline -Confirm:$false -ErrorAction SilentlyContinue
-        Write-AuditLog -Message "  Disconnected from Exchange Online." -Level Info
     }
     catch { }
 }

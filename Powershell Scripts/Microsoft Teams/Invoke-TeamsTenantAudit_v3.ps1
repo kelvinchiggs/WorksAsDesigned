@@ -58,7 +58,7 @@
     
 .NOTES
     Script Name    : Invoke-TeamsComplianceAudit.ps1
-    Version        : 1.0.0
+    Version        : 3.0.0
     Author         : Kelvin Chigorimbo
     Creation Date  : February 2026
     
@@ -69,7 +69,6 @@
     - Microsoft.Graph.Identity.DirectoryManagement
     - Microsoft.Graph.Identity.Governance
     - Microsoft.Graph.DeviceManagement
-    - ExchangeOnlineManagement
     - ImportExcel
     
     Required Permissions (Microsoft Graph):
@@ -249,7 +248,7 @@ function Test-RequiredModules {
     .SYNOPSIS
         Validates that all required PowerShell modules are installed and available.
     .DESCRIPTION
-        Checks for the presence of required modules for Teams, Graph API, Exchange,
+        Checks for the presence of required modules for Teams, Graph API,
         and Excel export functionality. Reports missing modules with installation guidance.
     .OUTPUTS
         Returns $true if all required modules are available, $false otherwise.
@@ -267,7 +266,6 @@ function Test-RequiredModules {
         @{ Name = "Microsoft.Graph.Identity.DirectoryManagement"; MinVersion = $null }
         @{ Name = "Microsoft.Graph.Identity.Governance"; MinVersion = $null }
         @{ Name = "Microsoft.Graph.DeviceManagement"; MinVersion = $null }
-        @{ Name = "ExchangeOnlineManagement"; MinVersion = "3.0.0" }
         @{ Name = "ImportExcel"; MinVersion = $null }
     )
     
@@ -319,7 +317,7 @@ function Import-RequiredModules {
         Imports all required PowerShell modules into the current session.
     .DESCRIPTION
         Loads the necessary modules for Teams administration, Microsoft Graph API,
-        Exchange Online management, and Excel export functionality.
+        and Excel export functionality.
     .OUTPUTS
         Returns $true if all modules imported successfully, $false otherwise.
     #>
@@ -335,7 +333,6 @@ function Import-RequiredModules {
         "Microsoft.Graph.Identity.DirectoryManagement"
         "Microsoft.Graph.Identity.Governance"
         "Microsoft.Graph.DeviceManagement"
-        "ExchangeOnlineManagement"
         "ImportExcel"
     )
     
@@ -379,7 +376,7 @@ function Connect-AuditServices {
     .SYNOPSIS
         Establishes connections to all required Microsoft services for the audit.
     .DESCRIPTION
-        Connects to Microsoft Teams, Microsoft Graph API, and Exchange Online
+        Connects to Microsoft Teams and Microsoft Graph API
         using the specified authentication method (interactive or app-based).
     .OUTPUTS
         Returns $true if all connections established successfully, $false otherwise.
@@ -457,28 +454,6 @@ function Connect-AuditServices {
         $connectionSuccess = $false
     }
     
-    # Connect to Exchange Online
-    Write-AuditLog -Message "Connecting to Exchange Online..." -Level Info
-    try {
-        if ($Interactive) {
-            if ($TenantId) {
-                Connect-ExchangeOnline -Organization $TenantId -ShowBanner:$false -ErrorAction Stop
-            }
-            else {
-                Connect-ExchangeOnline -ShowBanner:$false -ErrorAction Stop
-            }
-        }
-        elseif ($CertificateThumbprint) {
-            Connect-ExchangeOnline -Organization $TenantId -AppId $ClientId `
-                                  -CertificateThumbprint $CertificateThumbprint -ShowBanner:$false -ErrorAction Stop
-        }
-        Write-AuditLog -Message "  Connected to Exchange Online successfully." -Level Success
-    }
-    catch {
-        Write-AuditLog -Message "  Warning: Could not connect to Exchange Online: $($_.Exception.Message)" -Level Warning
-        Write-AuditLog -Message "  Some audit data may be unavailable." -Level Warning
-    }
-    
     return $connectionSuccess
 }
 
@@ -487,7 +462,7 @@ function Disconnect-AuditServices {
     .SYNOPSIS
         Disconnects from all Microsoft services used during the audit.
     .DESCRIPTION
-        Cleanly terminates connections to Microsoft Teams, Graph API, and Exchange Online
+        Cleanly terminates connections to Microsoft Teams and Graph API
         to release resources and clear authentication tokens.
     #>
     [CmdletBinding()]
@@ -506,12 +481,6 @@ function Disconnect-AuditServices {
         Write-AuditLog -Message "  Disconnected from Microsoft Graph." -Level Info
     }
     catch { }
-    
-    try {
-        Disconnect-ExchangeOnline -Confirm:$false -ErrorAction SilentlyContinue
-        Write-AuditLog -Message "  Disconnected from Exchange Online." -Level Info
-    }
-    catch { }
 }
 #End
 
@@ -519,10 +488,21 @@ function Disconnect-AuditServices {
 function Get-BestPracticesReference {
     <#
     .SYNOPSIS
-        Returns the reference data for default settings and best practices.
+        Returns the reference data for default settings, best practices, risk scoring, and remediation timelines.
     .DESCRIPTION
         Provides a comprehensive hashtable containing Microsoft Teams default settings,
-        industry best practices, and explanatory notes for each configuration area.
+        industry best practices, risk impact/likelihood scores, RAG rating metadata,
+        remediation effort classification, and security domain context for each
+        configurable setting. Each entry includes:
+        - Default: Microsoft out-of-box default value
+        - BestPractice: Recommended production configuration per Microsoft guidance
+        - Explanation: Technical description of the setting behaviour
+        - Recommendation: Actionable remediation guidance
+        - RiskImpact: Potential business/security impact if misconfigured (1=Low, 2=Medium, 3=High, 4=Critical)
+        - RiskLikelihood: Probability of exploitation or negative outcome (1=Unlikely, 2=Possible, 3=Likely, 4=Almost Certain)
+        - RemediationTimeline: Target remediation window (QuickWin=30 days, MediumTerm=90 days, Strategic=6-12 months)
+        - RemediationEffort: Estimated implementation effort (Low, Medium, High)
+        - SecurityDomain: NIST-aligned security domain classification
     #>
     [CmdletBinding()]
     param()
@@ -534,24 +514,44 @@ function Get-BestPracticesReference {
                 BestPractice = $true
                 Explanation = "Allows users to send emails directly to Teams channels using channel email addresses."
                 Recommendation = "Enable to facilitate email integration with Teams channels for information sharing."
+                RiskImpact = 1
+                RiskLikelihood = 1
+                RemediationTimeline = "QuickWin"
+                RemediationEffort = "Low"
+                SecurityDomain = "Collaboration"
             }
             AllowGuestCreateUpdateChannels = @{
                 Default = $true
                 BestPractice = $false
                 Explanation = "Controls whether guest users can create and modify channels within teams they are members of."
                 Recommendation = "Disable to maintain channel structure control. Guests should collaborate within existing channels."
+                RiskImpact = 2
+                RiskLikelihood = 3
+                RemediationTimeline = "QuickWin"
+                RemediationEffort = "Low"
+                SecurityDomain = "External Access"
             }
             AllowGuestDeleteChannels = @{
                 Default = $false
                 BestPractice = $false
                 Explanation = "Controls whether guest users can delete channels within teams."
                 Recommendation = "Keep disabled to prevent data loss and maintain channel integrity."
+                RiskImpact = 4
+                RiskLikelihood = 2
+                RemediationTimeline = "QuickWin"
+                RemediationEffort = "Low"
+                SecurityDomain = "Data Protection"
             }
             AllowResourceAccountSendMessage = @{
                 Default = $true
                 BestPractice = $true
                 Explanation = "Allows resource accounts (like meeting room accounts) to send messages."
                 Recommendation = "Enable for meeting room integration scenarios."
+                RiskImpact = 1
+                RiskLikelihood = 1
+                RemediationTimeline = "QuickWin"
+                RemediationEffort = "Low"
+                SecurityDomain = "Collaboration"
             }
         }
         
@@ -561,66 +561,121 @@ function Get-BestPracticesReference {
                 BestPractice = $false
                 Explanation = "Allows users without Microsoft accounts to join meetings as anonymous participants."
                 Recommendation = "Disable for internal meetings to enhance security. Enable only for specific external collaboration policies."
+                RiskImpact = 3
+                RiskLikelihood = 3
+                RemediationTimeline = "QuickWin"
+                RemediationEffort = "Low"
+                SecurityDomain = "Identity and Access"
             }
             AllowAnonymousUsersToStartMeeting = @{
                 Default = $false
                 BestPractice = $false
                 Explanation = "Allows anonymous users to start meetings without waiting for authenticated users."
                 Recommendation = "Keep disabled to ensure meeting control remains with authenticated organizers."
+                RiskImpact = 4
+                RiskLikelihood = 2
+                RemediationTimeline = "QuickWin"
+                RemediationEffort = "Low"
+                SecurityDomain = "Identity and Access"
             }
             AutoAdmittedUsers = @{
                 Default = "EveryoneInCompanyExcludingGuests"
                 BestPractice = "EveryoneInCompanyExcludingGuests"
                 Explanation = "Determines who automatically bypasses the lobby when joining meetings."
                 Recommendation = "Set to 'EveryoneInCompanyExcludingGuests' to balance security with user experience."
+                RiskImpact = 3
+                RiskLikelihood = 2
+                RemediationTimeline = "QuickWin"
+                RemediationEffort = "Low"
+                SecurityDomain = "Identity and Access"
             }
             AllowCloudRecording = @{
                 Default = $true
                 BestPractice = $true
                 Explanation = "Enables cloud recording capability for meetings."
                 Recommendation = "Enable with proper retention policies and compliance considerations."
+                RiskImpact = 2
+                RiskLikelihood = 2
+                RemediationTimeline = "MediumTerm"
+                RemediationEffort = "Medium"
+                SecurityDomain = "Data Protection"
             }
             AllowRecordingStorageOutsideRegion = @{
                 Default = $false
                 BestPractice = $false
                 Explanation = "Allows meeting recordings to be stored outside the tenant region."
                 Recommendation = "Disable to maintain data residency compliance."
+                RiskImpact = 4
+                RiskLikelihood = 2
+                RemediationTimeline = "QuickWin"
+                RemediationEffort = "Low"
+                SecurityDomain = "Data Protection"
             }
             AllowTranscription = @{
                 Default = $false
                 BestPractice = $true
                 Explanation = "Enables live transcription during meetings for accessibility."
                 Recommendation = "Enable to improve accessibility and meeting documentation."
+                RiskImpact = 1
+                RiskLikelihood = 2
+                RemediationTimeline = "MediumTerm"
+                RemediationEffort = "Low"
+                SecurityDomain = "Collaboration"
             }
             ScreenSharingMode = @{
                 Default = "EntireScreen"
                 BestPractice = "SingleApplication"
                 Explanation = "Controls the default screen sharing mode in meetings."
                 Recommendation = "Set to 'SingleApplication' to reduce accidental data exposure."
+                RiskImpact = 3
+                RiskLikelihood = 3
+                RemediationTimeline = "QuickWin"
+                RemediationEffort = "Low"
+                SecurityDomain = "Data Protection"
             }
             AllowExternalParticipantGiveRequestControl = @{
                 Default = $false
                 BestPractice = $false
                 Explanation = "Allows external participants to give or request control."
                 Recommendation = "Disable to maintain control over shared content with external parties."
+                RiskImpact = 3
+                RiskLikelihood = 2
+                RemediationTimeline = "QuickWin"
+                RemediationEffort = "Low"
+                SecurityDomain = "External Access"
             }
             AllowWatermarkForCameraVideo = @{
                 Default = $false
                 BestPractice = $true
                 Explanation = "Enables watermarking on video feeds for security."
                 Recommendation = "Enable for sensitive meetings to deter unauthorized recording."
+                RiskImpact = 2
+                RiskLikelihood = 2
+                RemediationTimeline = "MediumTerm"
+                RemediationEffort = "Medium"
+                SecurityDomain = "Data Protection"
             }
             AllowWatermarkForScreenSharing = @{
                 Default = $false
                 BestPractice = $true
                 Explanation = "Enables watermarking on shared screens."
                 Recommendation = "Enable for sensitive content sharing to track potential leaks."
+                RiskImpact = 2
+                RiskLikelihood = 2
+                RemediationTimeline = "MediumTerm"
+                RemediationEffort = "Medium"
+                SecurityDomain = "Data Protection"
             }
             DesignatedPresenterRoleMode = @{
                 Default = "EveryoneUserOverride"
                 BestPractice = "OrganizerOnlyUserOverride"
                 Explanation = "Determines the default presenter role assignment."
                 Recommendation = "Set to 'OrganizerOnlyUserOverride' for better meeting control."
+                RiskImpact = 2
+                RiskLikelihood = 2
+                RemediationTimeline = "QuickWin"
+                RemediationEffort = "Low"
+                SecurityDomain = "Collaboration"
             }
         }
         
@@ -630,42 +685,77 @@ function Get-BestPracticesReference {
                 BestPractice = $true
                 Explanation = "Enables URL preview generation when links are shared in messages."
                 Recommendation = "Enable for better user experience with link context."
+                RiskImpact = 1
+                RiskLikelihood = 1
+                RemediationTimeline = "QuickWin"
+                RemediationEffort = "Low"
+                SecurityDomain = "Collaboration"
             }
             AllowUserDeleteMessage = @{
                 Default = $true
                 BestPractice = $true
                 Explanation = "Allows users to delete their own messages."
                 Recommendation = "Enable with awareness that audit logs still retain deleted message records."
+                RiskImpact = 1
+                RiskLikelihood = 1
+                RemediationTimeline = "QuickWin"
+                RemediationEffort = "Low"
+                SecurityDomain = "Data Protection"
             }
             AllowUserEditMessage = @{
                 Default = $true
                 BestPractice = $true
                 Explanation = "Allows users to edit their sent messages."
                 Recommendation = "Enable for message correction capabilities."
+                RiskImpact = 1
+                RiskLikelihood = 1
+                RemediationTimeline = "QuickWin"
+                RemediationEffort = "Low"
+                SecurityDomain = "Collaboration"
             }
             AllowGiphy = @{
                 Default = $true
                 BestPractice = $true
                 Explanation = "Enables Giphy GIF integration in messages."
                 Recommendation = "Enable with content rating restrictions for workplace appropriateness."
+                RiskImpact = 1
+                RiskLikelihood = 2
+                RemediationTimeline = "QuickWin"
+                RemediationEffort = "Low"
+                SecurityDomain = "Collaboration"
             }
             GiphyRatingType = @{
                 Default = "Moderate"
                 BestPractice = "Strict"
                 Explanation = "Content rating filter for Giphy GIFs."
                 Recommendation = "Set to 'Strict' to ensure workplace-appropriate content."
+                RiskImpact = 2
+                RiskLikelihood = 2
+                RemediationTimeline = "QuickWin"
+                RemediationEffort = "Low"
+                SecurityDomain = "Collaboration"
             }
             AllowPriorityMessages = @{
                 Default = $true
                 BestPractice = $true
                 Explanation = "Enables priority/urgent message notifications."
                 Recommendation = "Enable with user training on appropriate use."
+                RiskImpact = 1
+                RiskLikelihood = 1
+                RemediationTimeline = "QuickWin"
+                RemediationEffort = "Low"
+                SecurityDomain = "Collaboration"
             }
             ReadReceiptsEnabledType = @{
                 Default = "UserPreference"
                 BestPractice = "UserPreference"
                 Explanation = "Controls read receipt functionality."
                 Recommendation = "Allow user preference for privacy respect."
+                RiskImpact = 1
+                RiskLikelihood = 1
+                RemediationTimeline = "QuickWin"
+                RemediationEffort = "Low"
+                SecurityDomain = "Collaboration"
             }
         }
         
@@ -675,24 +765,44 @@ function Get-BestPracticesReference {
                 BestPractice = $false
                 Explanation = "Allows communication with personal Microsoft accounts (Teams consumer)."
                 Recommendation = "Disable for enterprise security; enable only if business need exists."
+                RiskImpact = 3
+                RiskLikelihood = 3
+                RemediationTimeline = "QuickWin"
+                RemediationEffort = "Low"
+                SecurityDomain = "External Access"
             }
             AllowTeamsConsumerInbound = @{
                 Default = $true
                 BestPractice = $false
                 Explanation = "Allows inbound communication from Teams consumer accounts."
                 Recommendation = "Disable to prevent unsolicited contact from personal accounts."
+                RiskImpact = 3
+                RiskLikelihood = 3
+                RemediationTimeline = "QuickWin"
+                RemediationEffort = "Low"
+                SecurityDomain = "External Access"
             }
             AllowPublicUsers = @{
                 Default = $true
                 BestPractice = $false
                 Explanation = "Allows communication with Skype users."
                 Recommendation = "Disable unless Skype interop is required."
+                RiskImpact = 2
+                RiskLikelihood = 2
+                RemediationTimeline = "QuickWin"
+                RemediationEffort = "Low"
+                SecurityDomain = "External Access"
             }
             AllowFederatedUsers = @{
                 Default = $true
                 BestPractice = $true
                 Explanation = "Allows communication with other Microsoft 365 organizations."
                 Recommendation = "Enable for B2B collaboration; consider allowlist for sensitive organizations."
+                RiskImpact = 2
+                RiskLikelihood = 2
+                RemediationTimeline = "Strategic"
+                RemediationEffort = "High"
+                SecurityDomain = "External Access"
             }
         }
         
@@ -702,6 +812,11 @@ function Get-BestPracticesReference {
                 BestPractice = $true
                 Explanation = "Master switch for guest access to Teams."
                 Recommendation = "Enable with appropriate controls for B2B collaboration."
+                RiskImpact = 3
+                RiskLikelihood = 2
+                RemediationTimeline = "Strategic"
+                RemediationEffort = "High"
+                SecurityDomain = "External Access"
             }
         }
         
@@ -711,24 +826,44 @@ function Get-BestPracticesReference {
                 BestPractice = "AllowedAppList"
                 Explanation = "Controls which Microsoft apps are available by default."
                 Recommendation = "Use allowlist approach for controlled app deployment."
+                RiskImpact = 2
+                RiskLikelihood = 2
+                RemediationTimeline = "MediumTerm"
+                RemediationEffort = "Medium"
+                SecurityDomain = "Application Security"
             }
             GlobalCatalogAppsType = @{
                 Default = "AllowedAppList"
                 BestPractice = "AllowedAppList"
                 Explanation = "Controls which third-party apps are available."
                 Recommendation = "Use allowlist approach for security."
+                RiskImpact = 3
+                RiskLikelihood = 3
+                RemediationTimeline = "MediumTerm"
+                RemediationEffort = "Medium"
+                SecurityDomain = "Application Security"
             }
             AllowSideLoading = @{
                 Default = $true
                 BestPractice = $false
                 Explanation = "Allows users to sideload custom apps."
                 Recommendation = "Disable for security; use proper app deployment channels."
+                RiskImpact = 4
+                RiskLikelihood = 2
+                RemediationTimeline = "QuickWin"
+                RemediationEffort = "Low"
+                SecurityDomain = "Application Security"
             }
             AllowUserPinning = @{
                 Default = $true
                 BestPractice = $true
                 Explanation = "Allows users to pin apps to their Teams client."
                 Recommendation = "Enable for user customization while maintaining default pins."
+                RiskImpact = 1
+                RiskLikelihood = 1
+                RemediationTimeline = "QuickWin"
+                RemediationEffort = "Low"
+                SecurityDomain = "Collaboration"
             }
         }
         
@@ -738,6 +873,11 @@ function Get-BestPracticesReference {
                 BestPractice = "DisabledUserOverride"
                 Explanation = "Controls end-to-end encryption for 1:1 calls."
                 Recommendation = "Enable user override for sensitive communications."
+                RiskImpact = 3
+                RiskLikelihood = 2
+                RemediationTimeline = "MediumTerm"
+                RemediationEffort = "Medium"
+                SecurityDomain = "Data Protection"
             }
         }
         
@@ -747,12 +887,22 @@ function Get-BestPracticesReference {
                 BestPractice = $false
                 Explanation = "Allows preview features for users in this policy."
                 Recommendation = "Disable for production users; enable for pilot groups."
+                RiskImpact = 2
+                RiskLikelihood = 2
+                RemediationTimeline = "QuickWin"
+                RemediationEffort = "Low"
+                SecurityDomain = "Change Management"
             }
             UseNewTeamsClient = @{
                 Default = "MicrosoftChoice"
                 BestPractice = "NewTeamsAsDefault"
                 Explanation = "Controls adoption of new Teams client."
                 Recommendation = "Move to new Teams client for performance improvements."
+                RiskImpact = 2
+                RiskLikelihood = 3
+                RemediationTimeline = "Strategic"
+                RemediationEffort = "High"
+                SecurityDomain = "Change Management"
             }
         }
         
@@ -762,23 +912,199 @@ function Get-BestPracticesReference {
                 BestPractice = $true
                 Explanation = "Allows users to schedule live events."
                 Recommendation = "Enable for town halls and large broadcasts."
+                RiskImpact = 1
+                RiskLikelihood = 1
+                RemediationTimeline = "QuickWin"
+                RemediationEffort = "Low"
+                SecurityDomain = "Collaboration"
             }
             AllowBroadcastTranscription = @{
                 Default = $false
                 BestPractice = $true
                 Explanation = "Enables transcription for live events."
                 Recommendation = "Enable for accessibility and content capture."
+                RiskImpact = 1
+                RiskLikelihood = 2
+                RemediationTimeline = "MediumTerm"
+                RemediationEffort = "Low"
+                SecurityDomain = "Collaboration"
             }
             BroadcastRecordingMode = @{
                 Default = "UserOverride"
                 BestPractice = "AlwaysEnabled"
                 Explanation = "Controls live event recording."
                 Recommendation = "Always record for compliance and content retention."
+                RiskImpact = 3
+                RiskLikelihood = 2
+                RemediationTimeline = "MediumTerm"
+                RemediationEffort = "Medium"
+                SecurityDomain = "Data Protection"
             }
         }
     }
     
     return $bestPractices
+}
+#End
+
+#Start RAG Assessment and Remediation Functions
+function Get-RAGRating {
+    <#
+    .SYNOPSIS
+        Determines the RAG (Red/Amber/Green) status for a given setting based on current, default, and best practice values.
+    .DESCRIPTION
+        Evaluates a setting against its default and best practice values, then applies
+        risk impact and likelihood scoring to produce a RAG rating. The rating logic is:
+        - Green: Current value matches best practice
+        - Amber: Current value matches default but default differs from best practice, or
+                 the resulting risk score is moderate (4-8)
+        - Red:   Current value deviates from both default and best practice with a high
+                 risk score (9+), or setting creates a critical security exposure
+    .PARAMETER CurrentValue
+        The current tenant configuration value for the setting.
+    .PARAMETER BestPracticeEntry
+        The best practices reference hashtable entry containing Default, BestPractice,
+        RiskImpact, and RiskLikelihood values.
+    .OUTPUTS
+        Returns a hashtable with RAGStatus, RiskScore, ComplianceStatus, and RiskLevel.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowNull()]
+        $CurrentValue,
+        
+        [Parameter(Mandatory = $true)]
+        [hashtable]$BestPracticeEntry
+    )
+    
+    $defaultValue = $BestPracticeEntry.Default
+    $bestPracticeValue = $BestPracticeEntry.BestPractice
+    $impact = $BestPracticeEntry.RiskImpact
+    $likelihood = $BestPracticeEntry.RiskLikelihood
+    
+    # Calculate the base risk score (impact x likelihood matrix)
+    $riskScore = $impact * $likelihood
+    
+    # Determine compliance status
+    $complianceStatus = "Review"
+    if ([string]$CurrentValue -eq [string]$bestPracticeValue) {
+        $complianceStatus = "Compliant"
+    }
+    elseif ([string]$CurrentValue -eq [string]$defaultValue -and [string]$defaultValue -ne [string]$bestPracticeValue) {
+        $complianceStatus = "Default (Non-Optimal)"
+    }
+    elseif ([string]$CurrentValue -ne [string]$bestPracticeValue) {
+        $complianceStatus = "Non-Compliant"
+    }
+    
+    # Determine RAG status based on compliance and risk score
+    $ragStatus = "Green"
+    if ($complianceStatus -eq "Compliant") {
+        $ragStatus = "Green"
+    }
+    elseif ($complianceStatus -eq "Default (Non-Optimal)") {
+        # Default but not best practice - Amber unless risk score is high
+        if ($riskScore -ge 9) {
+            $ragStatus = "Red"
+        }
+        else {
+            $ragStatus = "Amber"
+        }
+    }
+    elseif ($complianceStatus -eq "Non-Compliant" -or $complianceStatus -eq "Review") {
+        # Deviates from best practice - rating depends on risk
+        if ($riskScore -ge 9) {
+            $ragStatus = "Red"
+        }
+        elseif ($riskScore -ge 4) {
+            $ragStatus = "Amber"
+        }
+        else {
+            $ragStatus = "Amber"
+        }
+    }
+    
+    # Map risk score to risk level descriptor
+    $riskLevel = switch ($riskScore) {
+        { $_ -ge 12 } { "Critical" }
+        { $_ -ge 9 }  { "High" }
+        { $_ -ge 4 }  { "Medium" }
+        default        { "Low" }
+    }
+    
+    return @{
+        RAGStatus = $ragStatus
+        RiskScore = $riskScore
+        ComplianceStatus = $complianceStatus
+        RiskLevel = $riskLevel
+    }
+}
+
+function Get-RemediationRoadmap {
+    <#
+    .SYNOPSIS
+        Generates a tiered remediation roadmap from all RAG-assessed audit findings.
+    .DESCRIPTION
+        Aggregates all non-Green findings and classifies them into three remediation tiers:
+        - Quick Wins (0-30 days): Low effort changes, typically single-setting policy toggles
+        - Medium Term (31-90 days): Moderate effort requiring testing, change management, or user communication
+        - Strategic (6-12 months): Complex changes requiring architecture decisions, licensing, or organizational change
+        Each finding includes the RAG status, risk score, remediation guidance, and effort estimate.
+    .PARAMETER AllFindings
+        Array of PSCustomObject findings from the audit assessment, each containing RAG and risk metadata.
+    .OUTPUTS
+        Returns a hashtable with QuickWins, MediumTerm, and Strategic arrays plus summary statistics.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [array]$AllFindings
+    )
+    
+    Write-AuditLog -Message "  Building remediation roadmap..." -Level Info
+    
+    # Filter to non-compliant findings only (exclude Green)
+    $actionableFindings = $AllFindings | Where-Object { $_.RAGStatus -ne "Green" }
+    
+    # Sort within each tier by risk score descending so highest-risk items surface first
+    $quickWins = @($actionableFindings | Where-Object { $_.RemediationTimeline -eq "QuickWin" } | Sort-Object { [int]$_.RiskScore } -Descending)
+    $mediumTerm = @($actionableFindings | Where-Object { $_.RemediationTimeline -eq "MediumTerm" } | Sort-Object { [int]$_.RiskScore } -Descending)
+    $strategic = @($actionableFindings | Where-Object { $_.RemediationTimeline -eq "Strategic" } | Sort-Object { [int]$_.RiskScore } -Descending)
+    
+    # Calculate summary statistics
+    $totalFindings = $AllFindings.Count
+    $greenCount = @($AllFindings | Where-Object { $_.RAGStatus -eq "Green" }).Count
+    $amberCount = @($AllFindings | Where-Object { $_.RAGStatus -eq "Amber" }).Count
+    $redCount = @($AllFindings | Where-Object { $_.RAGStatus -eq "Red" }).Count
+    
+    $summary = @{
+        TotalSettings = $totalFindings
+        GreenCount = $greenCount
+        AmberCount = $amberCount
+        RedCount = $redCount
+        CompliancePercentage = if ($totalFindings -gt 0) { [math]::Round(($greenCount / $totalFindings) * 100, 1) } else { 0 }
+        QuickWinCount = $quickWins.Count
+        MediumTermCount = $mediumTerm.Count
+        StrategicCount = $strategic.Count
+        HighestRiskScore = if ($actionableFindings.Count -gt 0) { ($actionableFindings | Measure-Object -Property RiskScore -Maximum).Maximum } else { 0 }
+    }
+    
+    Write-AuditLog -Message "    Total settings assessed: $totalFindings" -Level Info
+    Write-AuditLog -Message "    Green (Compliant): $greenCount ($($summary.CompliancePercentage)%)" -Level Success
+    Write-AuditLog -Message "    Amber (Review): $amberCount" -Level Warning
+    Write-AuditLog -Message "    Red (Action Required): $redCount" -Level Error
+    Write-AuditLog -Message "    Quick Wins (30 days): $($quickWins.Count)" -Level Info
+    Write-AuditLog -Message "    Medium Term (90 days): $($mediumTerm.Count)" -Level Info
+    Write-AuditLog -Message "    Strategic (6-12 months): $($strategic.Count)" -Level Info
+    
+    return @{
+        QuickWins = $quickWins
+        MediumTerm = $mediumTerm
+        Strategic = $strategic
+        Summary = $summary
+        AllFindings = $AllFindings
+    }
 }
 #End
 
@@ -2855,18 +3181,25 @@ function Get-TeamsSecurityComplianceAuditData {
 }
 #End
 
+
 #Start Report Generation Functions
 function New-TeamsAuditExcelReport {
     <#
     .SYNOPSIS
-        Generates a detailed Excel report of the audit findings.
+        Generates a comprehensive RAG-rated Excel report of the audit findings.
     .DESCRIPTION
         Creates an Excel workbook with multiple worksheets containing all audit results,
-        comparing current settings against defaults and best practices.
+        RAG (Red/Amber/Green) compliance ratings, risk impact vs likelihood scoring,
+        and a tiered remediation roadmap. The report includes:
+        - Executive Summary with RAG distribution, risk heat map, and compliance percentage
+        - Remediation Roadmap with Quick Wins (30 days), Medium Term (90 days), and Strategic (6-12 months)
+        - Per-domain worksheets with current vs default vs best practice comparison
+        - Conditional formatting for RAG status cells (Red/Amber/Green fill colours)
+        - Risk score columns with impact x likelihood matrix values
     .PARAMETER AuditData
         Hashtable containing all collected audit data.
     .PARAMETER BestPractices
-        Hashtable containing best practices reference data.
+        Hashtable containing best practices reference data with risk scoring metadata.
     .PARAMETER OutputPath
         Directory path where the report will be saved.
     .OUTPUTS
@@ -2884,34 +3217,213 @@ function New-TeamsAuditExcelReport {
         [string]$OutputPath
     )
     
-    Write-AuditLog -Message "Generating Excel report..." -Level Header
+    Write-AuditLog -Message "Generating RAG-rated Excel report..." -Level Header
     
     $timestamp = $script:StartTime.ToString("yyyyMMdd_HHmmss")
     $reportPath = Join-Path -Path $OutputPath -ChildPath "TeamsAudit_Report_$timestamp.xlsx"
     
+    # Collect all RAG-assessed findings across all policy domains into a unified array
+    # This array feeds both the per-domain worksheets and the summary/roadmap sheets
+    $allFindings = @()
+    
     try {
-        # Create Summary worksheet
-        Write-AuditLog -Message "  Creating Summary worksheet..." -Level Info
+        # ── Helper function: Assess a policy-based domain against best practices ──
+        # Evaluates each setting in a policy array against the best practices reference,
+        # producing RAG-rated finding objects with full risk metadata
+        function Get-PolicyDomainFindings {
+            param(
+                [Parameter(Mandatory = $true)]
+                [string]$DomainName,
+                [Parameter(Mandatory = $true)]
+                $Policies,
+                [Parameter(Mandatory = $true)]
+                [hashtable]$BPReference,
+                [Parameter(Mandatory = $false)]
+                [switch]$IsSinglePolicy
+            )
+            
+            $findings = @()
+            
+            if ($IsSinglePolicy) {
+                # Single-object domains (e.g., ExternalAccess, GuestAccess) - not an array of policies
+                foreach ($setting in $BPReference.Keys) {
+                    if ($Policies.ContainsKey($setting)) {
+                        $currentValue = $Policies[$setting]
+                        $bpEntry = $BPReference[$setting]
+                        $ragResult = Get-RAGRating -CurrentValue $currentValue -BestPracticeEntry $bpEntry
+                        
+                        $findings += [PSCustomObject]@{
+                            Domain            = $DomainName
+                            PolicyName        = "Org-Wide"
+                            Setting           = $setting
+                            CurrentValue      = [string]$currentValue
+                            DefaultValue      = [string]$bpEntry.Default
+                            BestPractice      = [string]$bpEntry.BestPractice
+                            RAGStatus         = $ragResult.RAGStatus
+                            ComplianceStatus  = $ragResult.ComplianceStatus
+                            RiskImpact        = $bpEntry.RiskImpact
+                            RiskLikelihood    = $bpEntry.RiskLikelihood
+                            RiskScore         = $ragResult.RiskScore
+                            RiskLevel         = $ragResult.RiskLevel
+                            SecurityDomain    = $bpEntry.SecurityDomain
+                            RemediationTimeline = $bpEntry.RemediationTimeline
+                            RemediationEffort = $bpEntry.RemediationEffort
+                            Explanation       = $bpEntry.Explanation
+                            Recommendation    = $bpEntry.Recommendation
+                        }
+                    }
+                }
+            }
+            else {
+                # Array-based domains (e.g., MeetingPolicies, MessagingPolicies)
+                foreach ($policy in $Policies) {
+                    foreach ($setting in $BPReference.Keys) {
+                        if ($policy.ContainsKey($setting)) {
+                            $currentValue = $policy[$setting]
+                            $bpEntry = $BPReference[$setting]
+                            $ragResult = Get-RAGRating -CurrentValue $currentValue -BestPracticeEntry $bpEntry
+                            
+                            $findings += [PSCustomObject]@{
+                                Domain            = $DomainName
+                                PolicyName        = $policy.Identity
+                                Setting           = $setting
+                                CurrentValue      = [string]$currentValue
+                                DefaultValue      = [string]$bpEntry.Default
+                                BestPractice      = [string]$bpEntry.BestPractice
+                                RAGStatus         = $ragResult.RAGStatus
+                                ComplianceStatus  = $ragResult.ComplianceStatus
+                                RiskImpact        = $bpEntry.RiskImpact
+                                RiskLikelihood    = $bpEntry.RiskLikelihood
+                                RiskScore         = $ragResult.RiskScore
+                                RiskLevel         = $ragResult.RiskLevel
+                                SecurityDomain    = $bpEntry.SecurityDomain
+                                RemediationTimeline = $bpEntry.RemediationTimeline
+                                RemediationEffort = $bpEntry.RemediationEffort
+                                Explanation       = $bpEntry.Explanation
+                                Recommendation    = $bpEntry.Recommendation
+                            }
+                        }
+                    }
+                }
+            }
+            
+            return $findings
+        }
+        
+        # ── Assess Meeting Policies ──
+        Write-AuditLog -Message "  Assessing Meeting Policies..." -Level Info
+        if ($AuditData.TeamsMeetings -and $AuditData.TeamsMeetings.MeetingPolicies) {
+            $meetingFindings = Get-PolicyDomainFindings -DomainName "Meeting Policies" -Policies $AuditData.TeamsMeetings.MeetingPolicies -BPReference $BestPractices.MeetingPolicies
+            $allFindings += $meetingFindings
+        }
+        
+        # ── Assess Messaging Policies ──
+        Write-AuditLog -Message "  Assessing Messaging Policies..." -Level Info
+        if ($AuditData.TeamsMessaging -and $AuditData.TeamsMessaging.MessagingPolicies) {
+            $messagingFindings = Get-PolicyDomainFindings -DomainName "Messaging Policies" -Policies $AuditData.TeamsMessaging.MessagingPolicies -BPReference $BestPractices.MessagingPolicies
+            $allFindings += $messagingFindings
+        }
+        
+        # ── Assess External Access ──
+        Write-AuditLog -Message "  Assessing External Access..." -Level Info
+        if ($AuditData.TeamsGovernance -and $AuditData.TeamsGovernance.ExternalAccess) {
+            $externalFindings = Get-PolicyDomainFindings -DomainName "External Access" -Policies $AuditData.TeamsGovernance.ExternalAccess -BPReference $BestPractices.ExternalAccess -IsSinglePolicy
+            $allFindings += $externalFindings
+        }
+        
+        # ── Assess App Policies ──
+        Write-AuditLog -Message "  Assessing App Policies..." -Level Info
+        if ($AuditData.TeamsAppManagement -and $AuditData.TeamsAppManagement.SetupPolicies) {
+            $appFindings = Get-PolicyDomainFindings -DomainName "App Policies" -Policies $AuditData.TeamsAppManagement.SetupPolicies -BPReference $BestPractices.AppPolicies
+            $allFindings += $appFindings
+        }
+        
+        # ── Assess Live Event Policies ──
+        Write-AuditLog -Message "  Assessing Live Event Policies..." -Level Info
+        if ($AuditData.TeamsMeetings -and $AuditData.TeamsMeetings.LiveEventPolicies) {
+            $liveEventFindings = Get-PolicyDomainFindings -DomainName "Live Event Policies" -Policies $AuditData.TeamsMeetings.LiveEventPolicies -BPReference $BestPractices.LiveEventsPolicies
+            $allFindings += $liveEventFindings
+        }
+        
+        # ── Assess Encryption Policies ──
+        Write-AuditLog -Message "  Assessing Encryption Policies..." -Level Info
+        if ($AuditData.TeamsEncryption -and $AuditData.TeamsEncryption.EncryptionPolicies) {
+            foreach ($policy in $AuditData.TeamsEncryption.EncryptionPolicies) {
+                $bpEntry = $BestPractices.EnhancedEncryption.AllowEndToEndEncryption
+                $ragResult = Get-RAGRating -CurrentValue $policy.CallingEndToEndEncryptionEnabledType -BestPracticeEntry $bpEntry
+                
+                $allFindings += [PSCustomObject]@{
+                    Domain            = "Enhanced Encryption"
+                    PolicyName        = $policy.Identity
+                    Setting           = "CallingEndToEndEncryptionEnabledType"
+                    CurrentValue      = [string]$policy.CallingEndToEndEncryptionEnabledType
+                    DefaultValue      = [string]$bpEntry.Default
+                    BestPractice      = [string]$bpEntry.BestPractice
+                    RAGStatus         = $ragResult.RAGStatus
+                    ComplianceStatus  = $ragResult.ComplianceStatus
+                    RiskImpact        = $bpEntry.RiskImpact
+                    RiskLikelihood    = $bpEntry.RiskLikelihood
+                    RiskScore         = $ragResult.RiskScore
+                    RiskLevel         = $ragResult.RiskLevel
+                    SecurityDomain    = $bpEntry.SecurityDomain
+                    RemediationTimeline = $bpEntry.RemediationTimeline
+                    RemediationEffort = $bpEntry.RemediationEffort
+                    Explanation       = $bpEntry.Explanation
+                    Recommendation    = $bpEntry.Recommendation
+                }
+            }
+        }
+        
+        # ── Assess Update Policies ──
+        Write-AuditLog -Message "  Assessing Update Policies..." -Level Info
+        if ($AuditData.TeamsUpdatePolicies -and $AuditData.TeamsUpdatePolicies.UpdatePolicies) {
+            $updateFindings = Get-PolicyDomainFindings -DomainName "Update Policies" -Policies $AuditData.TeamsUpdatePolicies.UpdatePolicies -BPReference $BestPractices.UpdatePolicies
+            $allFindings += $updateFindings
+        }
+        
+        # ── Assess Teams Settings ──
+        Write-AuditLog -Message "  Assessing Teams Settings..." -Level Info
+        if ($AuditData.TeamsSettings -and $AuditData.TeamsSettings.ClientConfiguration) {
+            $settingsFindings = Get-PolicyDomainFindings -DomainName "Teams Settings" -Policies $AuditData.TeamsSettings.ClientConfiguration -BPReference $BestPractices.TeamsSettings -IsSinglePolicy
+            $allFindings += $settingsFindings
+        }
+        
+        # ── Assess Guest Access ──
+        Write-AuditLog -Message "  Assessing Guest Access..." -Level Info
+        if ($AuditData.TeamsGovernance -and $AuditData.TeamsGovernance.GuestAccess) {
+            $guestFindings = Get-PolicyDomainFindings -DomainName "Guest Access" -Policies $AuditData.TeamsGovernance.GuestAccess -BPReference $BestPractices.GuestAccess -IsSinglePolicy
+            $allFindings += $guestFindings
+        }
+        
+        # ── Generate Remediation Roadmap ──
+        $roadmap = Get-RemediationRoadmap -AllFindings $allFindings
+        
+        # ══════════════════════════════════════════════════════════════════════════
+        # WORKSHEET 1: Executive Summary
+        # ══════════════════════════════════════════════════════════════════════════
+        Write-AuditLog -Message "  Creating Executive Summary worksheet..." -Level Info
+        
         $summaryData = @(
-            [PSCustomObject]@{
-                Category = "Audit Information"
-                Item = "Report Generated"
-                Value = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
-            }
-            [PSCustomObject]@{
-                Category = "Audit Information"
-                Item = "Author"
-                Value = "Kelvin Chigorimbo"
-            }
-            [PSCustomObject]@{
-                Category = "Audit Information"
-                Item = "Script Version"
-                Value = $script:ScriptVersion
-            }
+            [PSCustomObject]@{ Category = "Audit Information"; Item = "Report Generated"; Value = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss") }
+            [PSCustomObject]@{ Category = "Audit Information"; Item = "Author"; Value = "Kelvin Chigorimbo" }
+            [PSCustomObject]@{ Category = "Audit Information"; Item = "Script Version"; Value = $script:ScriptVersion }
+            [PSCustomObject]@{ Category = ""; Item = ""; Value = "" }
+            [PSCustomObject]@{ Category = "RAG Summary"; Item = "Total Settings Assessed"; Value = $roadmap.Summary.TotalSettings }
+            [PSCustomObject]@{ Category = "RAG Summary"; Item = "GREEN - Compliant"; Value = $roadmap.Summary.GreenCount }
+            [PSCustomObject]@{ Category = "RAG Summary"; Item = "AMBER - Review Required"; Value = $roadmap.Summary.AmberCount }
+            [PSCustomObject]@{ Category = "RAG Summary"; Item = "RED - Action Required"; Value = $roadmap.Summary.RedCount }
+            [PSCustomObject]@{ Category = "RAG Summary"; Item = "Overall Compliance (%)"; Value = "$($roadmap.Summary.CompliancePercentage)%" }
+            [PSCustomObject]@{ Category = ""; Item = ""; Value = "" }
+            [PSCustomObject]@{ Category = "Remediation Roadmap"; Item = "Quick Wins (0-30 days)"; Value = $roadmap.Summary.QuickWinCount }
+            [PSCustomObject]@{ Category = "Remediation Roadmap"; Item = "Medium Term (31-90 days)"; Value = $roadmap.Summary.MediumTermCount }
+            [PSCustomObject]@{ Category = "Remediation Roadmap"; Item = "Strategic (6-12 months)"; Value = $roadmap.Summary.StrategicCount }
+            [PSCustomObject]@{ Category = "Remediation Roadmap"; Item = "Highest Risk Score"; Value = $roadmap.Summary.HighestRiskScore }
         )
         
+        # Append Teams inventory statistics if available
         if ($AuditData.Teams -and $AuditData.Teams.Statistics) {
             $stats = $AuditData.Teams.Statistics
+            $summaryData += [PSCustomObject]@{ Category = ""; Item = ""; Value = "" }
             $summaryData += [PSCustomObject]@{ Category = "Teams Overview"; Item = "Total Teams"; Value = $stats.TotalTeams }
             $summaryData += [PSCustomObject]@{ Category = "Teams Overview"; Item = "Active Teams"; Value = $stats.ActiveTeams }
             $summaryData += [PSCustomObject]@{ Category = "Teams Overview"; Item = "Archived Teams"; Value = $stats.ArchivedTeams }
@@ -2919,167 +3431,145 @@ function New-TeamsAuditExcelReport {
             $summaryData += [PSCustomObject]@{ Category = "Teams Overview"; Item = "Private Teams"; Value = $stats.PrivateTeams }
         }
         
-        $summaryData | Export-Excel -Path $reportPath -WorksheetName "Summary" -AutoSize -TableName "Summary" -TableStyle Medium2
+        $summaryData | Export-Excel -Path $reportPath -WorksheetName "Executive Summary" -AutoSize -TableName "ExecutiveSummary" -TableStyle Medium2
         
-        # Create Meeting Policies worksheet
-        Write-AuditLog -Message "  Creating Meeting Policies worksheet..." -Level Info
-        if ($AuditData.TeamsMeetings -and $AuditData.TeamsMeetings.MeetingPolicies) {
-            $meetingPoliciesData = @()
-            $bp = $BestPractices.MeetingPolicies
+        # ══════════════════════════════════════════════════════════════════════════
+        # WORKSHEET 2: RAG Assessment (All Findings)
+        # ══════════════════════════════════════════════════════════════════════════
+        Write-AuditLog -Message "  Creating RAG Assessment worksheet..." -Level Info
+        
+        if ($allFindings.Count -gt 0) {
+            # Define conditional formatting parameters for RAG status column
+            $ragConditionalFormat = @(
+                # Green fill for compliant settings
+                New-ConditionalText -Text "Green" -BackgroundColor Green -ConditionalTextColor White
+                # Amber/Orange fill for review-required settings
+                New-ConditionalText -Text "Amber" -BackgroundColor Orange -ConditionalTextColor Black
+                # Red fill for action-required settings
+                New-ConditionalText -Text "Red" -BackgroundColor Red -ConditionalTextColor White
+            )
             
-            foreach ($policy in $AuditData.TeamsMeetings.MeetingPolicies) {
-                foreach ($setting in $bp.Keys) {
-                    if ($policy.ContainsKey($setting)) {
-                        $currentValue = $policy[$setting]
-                        $defaultValue = $bp[$setting].Default
-                        $bestPracticeValue = $bp[$setting].BestPractice
-                        
-                        $compliance = "Review"
-                        if ([string]$currentValue -eq [string]$bestPracticeValue) {
-                            $compliance = "Compliant"
-                        }
-                        elseif ([string]$currentValue -eq [string]$defaultValue -and [string]$defaultValue -ne [string]$bestPracticeValue) {
-                            $compliance = "Default (Non-Optimal)"
-                        }
-                        
-                        $meetingPoliciesData += [PSCustomObject]@{
-                            PolicyName = $policy.Identity
-                            Setting = $setting
-                            CurrentValue = [string]$currentValue
-                            DefaultValue = [string]$defaultValue
-                            BestPractice = [string]$bestPracticeValue
-                            Compliance = $compliance
-                            Explanation = $bp[$setting].Explanation
-                            Recommendation = $bp[$setting].Recommendation
-                        }
-                    }
-                }
-            }
+            $ragAssessmentData = $allFindings | Select-Object `
+                Domain, PolicyName, Setting, CurrentValue, DefaultValue, BestPractice, `
+                RAGStatus, ComplianceStatus, RiskImpact, RiskLikelihood, RiskScore, RiskLevel, `
+                SecurityDomain, RemediationTimeline, RemediationEffort, Recommendation |
+                Sort-Object @{Expression = "RAGStatus"; Descending = $false}, @{Expression = "RiskScore"; Descending = $true}
             
-            if ($meetingPoliciesData.Count -gt 0) {
-                $meetingPoliciesData | Export-Excel -Path $reportPath -WorksheetName "Meeting Policies" -AutoSize -TableName "MeetingPolicies" -TableStyle Medium2 -Append
-            }
+            $ragAssessmentData | Export-Excel -Path $reportPath -WorksheetName "RAG Assessment" -AutoSize `
+                -TableName "RAGAssessment" -TableStyle Medium2 -Append `
+                -ConditionalText $ragConditionalFormat
         }
         
-        # Create Messaging Policies worksheet
-        Write-AuditLog -Message "  Creating Messaging Policies worksheet..." -Level Info
-        if ($AuditData.TeamsMessaging -and $AuditData.TeamsMessaging.MessagingPolicies) {
-            $messagingPoliciesData = @()
-            $bp = $BestPractices.MessagingPolicies
+        # ══════════════════════════════════════════════════════════════════════════
+        # WORKSHEET 3: Remediation Roadmap - Quick Wins (30 Days)
+        # ══════════════════════════════════════════════════════════════════════════
+        Write-AuditLog -Message "  Creating Quick Wins Roadmap worksheet..." -Level Info
+        
+        if ($roadmap.QuickWins.Count -gt 0) {
+            $quickWinData = $roadmap.QuickWins | Select-Object `
+                @{N='Priority';E={$_.RiskScore}}, Domain, PolicyName, Setting, `
+                RAGStatus, RiskLevel, CurrentValue, BestPractice, `
+                RemediationEffort, SecurityDomain, Recommendation |
+                Sort-Object Priority -Descending
             
-            foreach ($policy in $AuditData.TeamsMessaging.MessagingPolicies) {
-                foreach ($setting in $bp.Keys) {
-                    if ($policy.ContainsKey($setting)) {
-                        $currentValue = $policy[$setting]
-                        $defaultValue = $bp[$setting].Default
-                        $bestPracticeValue = $bp[$setting].BestPractice
-                        
-                        $compliance = "Review"
-                        if ([string]$currentValue -eq [string]$bestPracticeValue) {
-                            $compliance = "Compliant"
-                        }
-                        elseif ([string]$currentValue -eq [string]$defaultValue -and [string]$defaultValue -ne [string]$bestPracticeValue) {
-                            $compliance = "Default (Non-Optimal)"
-                        }
-                        
-                        $messagingPoliciesData += [PSCustomObject]@{
-                            PolicyName = $policy.Identity
-                            Setting = $setting
-                            CurrentValue = [string]$currentValue
-                            DefaultValue = [string]$defaultValue
-                            BestPractice = [string]$bestPracticeValue
-                            Compliance = $compliance
-                            Explanation = $bp[$setting].Explanation
-                            Recommendation = $bp[$setting].Recommendation
-                        }
-                    }
-                }
-            }
+            $ragConditionalFormatQW = @(
+                New-ConditionalText -Text "Green" -BackgroundColor Green -ConditionalTextColor White
+                New-ConditionalText -Text "Amber" -BackgroundColor Orange -ConditionalTextColor Black
+                New-ConditionalText -Text "Red" -BackgroundColor Red -ConditionalTextColor White
+            )
             
-            if ($messagingPoliciesData.Count -gt 0) {
-                $messagingPoliciesData | Export-Excel -Path $reportPath -WorksheetName "Messaging Policies" -AutoSize -TableName "MessagingPolicies" -TableStyle Medium2 -Append
-            }
+            $quickWinData | Export-Excel -Path $reportPath -WorksheetName "Quick Wins (30 Days)" -AutoSize `
+                -TableName "QuickWins" -TableStyle Medium2 -Append `
+                -ConditionalText $ragConditionalFormatQW
         }
         
-        # Create External Access worksheet
-        Write-AuditLog -Message "  Creating External Access worksheet..." -Level Info
-        if ($AuditData.TeamsGovernance -and $AuditData.TeamsGovernance.ExternalAccess) {
-            $externalAccessData = @()
-            $bp = $BestPractices.ExternalAccess
-            $extAccess = $AuditData.TeamsGovernance.ExternalAccess
+        # ══════════════════════════════════════════════════════════════════════════
+        # WORKSHEET 4: Remediation Roadmap - Medium Term (90 Days)
+        # ══════════════════════════════════════════════════════════════════════════
+        Write-AuditLog -Message "  Creating Medium Term Roadmap worksheet..." -Level Info
+        
+        if ($roadmap.MediumTerm.Count -gt 0) {
+            $mediumTermData = $roadmap.MediumTerm | Select-Object `
+                @{N='Priority';E={$_.RiskScore}}, Domain, PolicyName, Setting, `
+                RAGStatus, RiskLevel, CurrentValue, BestPractice, `
+                RemediationEffort, SecurityDomain, Recommendation |
+                Sort-Object Priority -Descending
             
-            foreach ($setting in $bp.Keys) {
-                if ($extAccess.ContainsKey($setting)) {
-                    $currentValue = $extAccess[$setting]
-                    $defaultValue = $bp[$setting].Default
-                    $bestPracticeValue = $bp[$setting].BestPractice
+            $ragConditionalFormatMT = @(
+                New-ConditionalText -Text "Green" -BackgroundColor Green -ConditionalTextColor White
+                New-ConditionalText -Text "Amber" -BackgroundColor Orange -ConditionalTextColor Black
+                New-ConditionalText -Text "Red" -BackgroundColor Red -ConditionalTextColor White
+            )
+            
+            $mediumTermData | Export-Excel -Path $reportPath -WorksheetName "Medium Term (90 Days)" -AutoSize `
+                -TableName "MediumTerm" -TableStyle Medium2 -Append `
+                -ConditionalText $ragConditionalFormatMT
+        }
+        
+        # ══════════════════════════════════════════════════════════════════════════
+        # WORKSHEET 5: Remediation Roadmap - Strategic (6-12 Months)
+        # ══════════════════════════════════════════════════════════════════════════
+        Write-AuditLog -Message "  Creating Strategic Roadmap worksheet..." -Level Info
+        
+        if ($roadmap.Strategic.Count -gt 0) {
+            $strategicData = $roadmap.Strategic | Select-Object `
+                @{N='Priority';E={$_.RiskScore}}, Domain, PolicyName, Setting, `
+                RAGStatus, RiskLevel, CurrentValue, BestPractice, `
+                RemediationEffort, SecurityDomain, Recommendation |
+                Sort-Object Priority -Descending
+            
+            $ragConditionalFormatST = @(
+                New-ConditionalText -Text "Green" -BackgroundColor Green -ConditionalTextColor White
+                New-ConditionalText -Text "Amber" -BackgroundColor Orange -ConditionalTextColor Black
+                New-ConditionalText -Text "Red" -BackgroundColor Red -ConditionalTextColor White
+            )
+            
+            $strategicData | Export-Excel -Path $reportPath -WorksheetName "Strategic (6-12 Months)" -AutoSize `
+                -TableName "StrategicChanges" -TableStyle Medium2 -Append `
+                -ConditionalText $ragConditionalFormatST
+        }
+        
+        # ══════════════════════════════════════════════════════════════════════════
+        # WORKSHEET 6: Risk Matrix
+        # ══════════════════════════════════════════════════════════════════════════
+        Write-AuditLog -Message "  Creating Risk Matrix worksheet..." -Level Info
+        
+        if ($allFindings.Count -gt 0) {
+            # Build a security domain risk summary for the risk matrix
+            $riskMatrixData = $allFindings |
+                Where-Object { $_.RAGStatus -ne "Green" } |
+                Group-Object SecurityDomain |
+                ForEach-Object {
+                    $domainFindings = $_.Group
+                    $redCount = @($domainFindings | Where-Object { $_.RAGStatus -eq "Red" }).Count
+                    $amberCount = @($domainFindings | Where-Object { $_.RAGStatus -eq "Amber" }).Count
+                    $maxRisk = ($domainFindings | Measure-Object -Property RiskScore -Maximum).Maximum
+                    $avgRisk = [math]::Round(($domainFindings | Measure-Object -Property RiskScore -Average).Average, 1)
                     
-                    $compliance = "Review"
-                    if ([string]$currentValue -eq [string]$bestPracticeValue) {
-                        $compliance = "Compliant"
+                    [PSCustomObject]@{
+                        SecurityDomain   = $_.Name
+                        TotalFindings    = $_.Count
+                        RedFindings      = $redCount
+                        AmberFindings    = $amberCount
+                        HighestRiskScore = $maxRisk
+                        AverageRiskScore = $avgRisk
+                        TopPriority      = ($domainFindings | Sort-Object RiskScore -Descending | Select-Object -First 1).Setting
                     }
-                    elseif ([string]$currentValue -eq [string]$defaultValue -and [string]$defaultValue -ne [string]$bestPracticeValue) {
-                        $compliance = "Default (Non-Optimal)"
-                    }
-                    
-                    $externalAccessData += [PSCustomObject]@{
-                        Setting = $setting
-                        CurrentValue = [string]$currentValue
-                        DefaultValue = [string]$defaultValue
-                        BestPractice = [string]$bestPracticeValue
-                        Compliance = $compliance
-                        Explanation = $bp[$setting].Explanation
-                        Recommendation = $bp[$setting].Recommendation
-                    }
-                }
-            }
+                } |
+                Sort-Object HighestRiskScore -Descending
             
-            if ($externalAccessData.Count -gt 0) {
-                $externalAccessData | Export-Excel -Path $reportPath -WorksheetName "External Access" -AutoSize -TableName "ExternalAccess" -TableStyle Medium2 -Append
+            if ($riskMatrixData) {
+                $riskMatrixData | Export-Excel -Path $reportPath -WorksheetName "Risk Matrix" -AutoSize `
+                    -TableName "RiskMatrix" -TableStyle Medium2 -Append
             }
         }
         
-        # Create App Policies worksheet
-        Write-AuditLog -Message "  Creating App Policies worksheet..." -Level Info
-        if ($AuditData.TeamsAppManagement -and $AuditData.TeamsAppManagement.SetupPolicies) {
-            $appPoliciesData = @()
-            $bp = $BestPractices.AppPolicies
-            
-            foreach ($policy in $AuditData.TeamsAppManagement.SetupPolicies) {
-                foreach ($setting in $bp.Keys) {
-                    if ($policy.ContainsKey($setting)) {
-                        $currentValue = $policy[$setting]
-                        $defaultValue = $bp[$setting].Default
-                        $bestPracticeValue = $bp[$setting].BestPractice
-                        
-                        $compliance = "Review"
-                        if ([string]$currentValue -eq [string]$bestPracticeValue) {
-                            $compliance = "Compliant"
-                        }
-                        elseif ([string]$currentValue -eq [string]$defaultValue -and [string]$defaultValue -ne [string]$bestPracticeValue) {
-                            $compliance = "Default (Non-Optimal)"
-                        }
-                        
-                        $appPoliciesData += [PSCustomObject]@{
-                            PolicyName = $policy.Identity
-                            Setting = $setting
-                            CurrentValue = [string]$currentValue
-                            DefaultValue = [string]$defaultValue
-                            BestPractice = [string]$bestPracticeValue
-                            Compliance = $compliance
-                            Explanation = $bp[$setting].Explanation
-                            Recommendation = $bp[$setting].Recommendation
-                        }
-                    }
-                }
-            }
-            
-            if ($appPoliciesData.Count -gt 0) {
-                $appPoliciesData | Export-Excel -Path $reportPath -WorksheetName "App Policies" -AutoSize -TableName "AppPolicies" -TableStyle Medium2 -Append
-            }
-        }
+        # ══════════════════════════════════════════════════════════════════════════
+        # REMAINING DOMAIN-SPECIFIC WORKSHEETS (inventory data, no RAG scoring)
+        # These worksheets contain raw configuration data for reference and evidence
+        # ══════════════════════════════════════════════════════════════════════════
         
-        # Create Channels Policies worksheet
+        # Channels Policies worksheet
         Write-AuditLog -Message "  Creating Channels Policies worksheet..." -Level Info
         if ($AuditData.TeamsPolicies -and $AuditData.TeamsPolicies.ChannelsPolicies) {
             $channelsPoliciesData = foreach ($policy in $AuditData.TeamsPolicies.ChannelsPolicies) {
@@ -3094,84 +3584,10 @@ function New-TeamsAuditExcelReport {
                     AllowUserToParticipateInExternalSharedChannel = $policy.AllowUserToParticipateInExternalSharedChannel
                 }
             }
-            
             $channelsPoliciesData | Export-Excel -Path $reportPath -WorksheetName "Channels Policies" -AutoSize -TableName "ChannelsPolicies" -TableStyle Medium2 -Append
         }
         
-        # Create Encryption Policies worksheet
-        Write-AuditLog -Message "  Creating Encryption Policies worksheet..." -Level Info
-        if ($AuditData.TeamsEncryption -and $AuditData.TeamsEncryption.EncryptionPolicies) {
-            $encryptionPoliciesData = foreach ($policy in $AuditData.TeamsEncryption.EncryptionPolicies) {
-                [PSCustomObject]@{
-                    Identity = $policy.Identity
-                    Description = $policy.Description
-                    CallingEndToEndEncryptionEnabledType = $policy.CallingEndToEndEncryptionEnabledType
-                    MeetingEndToEndEncryption = $policy.MeetingEndToEndEncryption
-                    BestPractice = $BestPractices.EnhancedEncryption.AllowEndToEndEncryption.BestPractice
-                    Recommendation = $BestPractices.EnhancedEncryption.AllowEndToEndEncryption.Recommendation
-                }
-            }
-            
-            $encryptionPoliciesData | Export-Excel -Path $reportPath -WorksheetName "Encryption Policies" -AutoSize -TableName "EncryptionPolicies" -TableStyle Medium2 -Append
-        }
-        
-        # Create Live Event Policies worksheet
-        Write-AuditLog -Message "  Creating Live Event Policies worksheet..." -Level Info
-        if ($AuditData.TeamsMeetings -and $AuditData.TeamsMeetings.LiveEventPolicies) {
-            $liveEventPoliciesData = @()
-            $bp = $BestPractices.LiveEventsPolicies
-            
-            foreach ($policy in $AuditData.TeamsMeetings.LiveEventPolicies) {
-                foreach ($setting in $bp.Keys) {
-                    if ($policy.ContainsKey($setting)) {
-                        $currentValue = $policy[$setting]
-                        $defaultValue = $bp[$setting].Default
-                        $bestPracticeValue = $bp[$setting].BestPractice
-                        
-                        $compliance = "Review"
-                        if ([string]$currentValue -eq [string]$bestPracticeValue) {
-                            $compliance = "Compliant"
-                        }
-                        
-                        $liveEventPoliciesData += [PSCustomObject]@{
-                            PolicyName = $policy.Identity
-                            Setting = $setting
-                            CurrentValue = [string]$currentValue
-                            DefaultValue = [string]$defaultValue
-                            BestPractice = [string]$bestPracticeValue
-                            Compliance = $compliance
-                            Explanation = $bp[$setting].Explanation
-                            Recommendation = $bp[$setting].Recommendation
-                        }
-                    }
-                }
-            }
-            
-            if ($liveEventPoliciesData.Count -gt 0) {
-                $liveEventPoliciesData | Export-Excel -Path $reportPath -WorksheetName "Live Event Policies" -AutoSize -TableName "LiveEventPolicies" -TableStyle Medium2 -Append
-            }
-        }
-        
-        # Create Device Policies worksheet
-        Write-AuditLog -Message "  Creating Device Policies worksheet..." -Level Info
-        if ($AuditData.TeamsDevices -and $AuditData.TeamsDevices.DevicePolicies) {
-            $devicePoliciesData = foreach ($policy in $AuditData.TeamsDevices.DevicePolicies) {
-                [PSCustomObject]@{
-                    Identity = $policy.Identity
-                    Description = $policy.Description
-                    SignInMode = $policy.SignInMode
-                    SearchOnCommonAreaPhoneMode = $policy.SearchOnCommonAreaPhoneMode
-                    AllowHomeScreen = $policy.AllowHomeScreen
-                    AllowBetterTogether = $policy.AllowBetterTogether
-                    AllowHotDesking = $policy.AllowHotDesking
-                    HotDeskingIdleTimeoutInMinutes = $policy.HotDeskingIdleTimeoutInMinutes
-                }
-            }
-            
-            $devicePoliciesData | Export-Excel -Path $reportPath -WorksheetName "Device Policies" -AutoSize -TableName "DevicePolicies" -TableStyle Medium2 -Append
-        }
-        
-        # Create Conditional Access worksheet
+        # Conditional Access worksheet
         Write-AuditLog -Message "  Creating Conditional Access worksheet..." -Level Info
         if ($AuditData.TeamsSecurity -and $AuditData.TeamsSecurity.ConditionalAccessPolicies) {
             $caPoliciesData = foreach ($policy in $AuditData.TeamsSecurity.ConditionalAccessPolicies) {
@@ -3186,11 +3602,10 @@ function New-TeamsAuditExcelReport {
                     CreatedDateTime = $policy.CreatedDateTime
                 }
             }
-            
             $caPoliciesData | Export-Excel -Path $reportPath -WorksheetName "Conditional Access" -AutoSize -TableName "ConditionalAccess" -TableStyle Medium2 -Append
         }
         
-        # Create PIM Role Assignments worksheet
+        # PIM Role Assignments worksheet
         Write-AuditLog -Message "  Creating PIM Role Assignments worksheet..." -Level Info
         if ($AuditData.TeamsSecurity -and $AuditData.TeamsSecurity.PIMRoleAssignments) {
             $pimData = foreach ($assignment in $AuditData.TeamsSecurity.PIMRoleAssignments) {
@@ -3202,11 +3617,10 @@ function New-TeamsAuditExcelReport {
                     Recommendation = "Use Eligible assignments with PIM for just-in-time access"
                 }
             }
-            
             $pimData | Export-Excel -Path $reportPath -WorksheetName "PIM Assignments" -AutoSize -TableName "PIMAssignments" -TableStyle Medium2 -Append
         }
         
-        # Create Lifecycle Management worksheet
+        # Lifecycle Management worksheet
         Write-AuditLog -Message "  Creating Lifecycle Management worksheet..." -Level Info
         if ($AuditData.TeamsLifecycle -and $AuditData.TeamsLifecycle.ExpirationPolicy) {
             $lifecycleData = @(
@@ -3221,16 +3635,14 @@ function New-TeamsAuditExcelReport {
                     Recommendation = "Apply to 'All' groups for comprehensive lifecycle management"
                 }
             )
-            
             $lifecycleData | Export-Excel -Path $reportPath -WorksheetName "Lifecycle Management" -AutoSize -TableName "LifecycleManagement" -TableStyle Medium2 -Append
         }
         
-        # Create Guest Access worksheet
+        # Guest Access inventory worksheet (full detail beyond the RAG-assessed setting)
         Write-AuditLog -Message "  Creating Guest Access worksheet..." -Level Info
         if ($AuditData.TeamsGovernance -and $AuditData.TeamsGovernance.GuestAccess) {
             $guestAccessData = @()
             $guestAccess = $AuditData.TeamsGovernance.GuestAccess
-            
             foreach ($key in $guestAccess.Keys) {
                 $guestAccessData += [PSCustomObject]@{
                     Setting = $key
@@ -3248,11 +3660,10 @@ function New-TeamsAuditExcelReport {
                     }
                 }
             }
-            
             $guestAccessData | Export-Excel -Path $reportPath -WorksheetName "Guest Access" -AutoSize -TableName "GuestAccess" -TableStyle Medium2 -Append
         }
         
-        # Create App Catalog worksheet
+        # App Catalog worksheet
         Write-AuditLog -Message "  Creating App Catalog worksheet..." -Level Info
         if ($AuditData.TeamsAppManagement -and $AuditData.TeamsAppManagement.AppCatalog) {
             $appCatalogData = foreach ($app in $AuditData.TeamsAppManagement.AppCatalog) {
@@ -3262,14 +3673,12 @@ function New-TeamsAuditExcelReport {
                     ExternalId = $app.ExternalId
                 }
             }
-            
             $appCatalogData | Export-Excel -Path $reportPath -WorksheetName "App Catalog" -AutoSize -TableName "AppCatalog" -TableStyle Medium2 -Append
         }
         
-        # Create Teams Phone - Voice Routing worksheet
+        # Teams Phone worksheets
         Write-AuditLog -Message "  Creating Teams Phone worksheets..." -Level Info
         if ($AuditData.TeamsPhone) {
-            # Voice Routing Policies
             if ($AuditData.TeamsPhone.OnlineVoiceRoutingPolicies -and $AuditData.TeamsPhone.OnlineVoiceRoutingPolicies.Count -gt 0) {
                 $voiceRoutingData = foreach ($policy in $AuditData.TeamsPhone.OnlineVoiceRoutingPolicies) {
                     [PSCustomObject]@{
@@ -3279,10 +3688,9 @@ function New-TeamsAuditExcelReport {
                         RouteType = $policy.RouteType
                     }
                 }
-                $voiceRoutingData | Export-Excel -Path $reportPath -WorksheetName "Voice Routing Policies" -AutoSize -TableName "VoiceRoutingPolicies" -TableStyle Medium2 -Append
+                $voiceRoutingData | Export-Excel -Path $reportPath -WorksheetName "Voice Routing" -AutoSize -TableName "VoiceRoutingPolicies" -TableStyle Medium2 -Append
             }
             
-            # Voice Routes
             if ($AuditData.TeamsPhone.OnlineVoiceRoutes -and $AuditData.TeamsPhone.OnlineVoiceRoutes.Count -gt 0) {
                 $voiceRoutesData = foreach ($route in $AuditData.TeamsPhone.OnlineVoiceRoutes) {
                     [PSCustomObject]@{
@@ -3297,7 +3705,6 @@ function New-TeamsAuditExcelReport {
                 $voiceRoutesData | Export-Excel -Path $reportPath -WorksheetName "Voice Routes" -AutoSize -TableName "VoiceRoutes" -TableStyle Medium2 -Append
             }
             
-            # Dial Plans
             if ($AuditData.TeamsPhone.TenantDialPlans -and $AuditData.TeamsPhone.TenantDialPlans.Count -gt 0) {
                 $dialPlansData = foreach ($plan in $AuditData.TeamsPhone.TenantDialPlans) {
                     [PSCustomObject]@{
@@ -3312,7 +3719,6 @@ function New-TeamsAuditExcelReport {
                 $dialPlansData | Export-Excel -Path $reportPath -WorksheetName "Dial Plans" -AutoSize -TableName "DialPlans" -TableStyle Medium2 -Append
             }
             
-            # PSTN Gateways (SBCs)
             if ($AuditData.TeamsPhone.OnlinePSTNGateways -and $AuditData.TeamsPhone.OnlinePSTNGateways.Count -gt 0) {
                 $gatewaysData = foreach ($gw in $AuditData.TeamsPhone.OnlinePSTNGateways) {
                     [PSCustomObject]@{
@@ -3331,7 +3737,6 @@ function New-TeamsAuditExcelReport {
                 $gatewaysData | Export-Excel -Path $reportPath -WorksheetName "PSTN Gateways" -AutoSize -TableName "PSTNGateways" -TableStyle Medium2 -Append
             }
             
-            # Call Queues
             if ($AuditData.TeamsPhone.CallQueues -and $AuditData.TeamsPhone.CallQueues.Count -gt 0) {
                 $callQueuesData = foreach ($queue in $AuditData.TeamsPhone.CallQueues) {
                     [PSCustomObject]@{
@@ -3351,7 +3756,6 @@ function New-TeamsAuditExcelReport {
                 $callQueuesData | Export-Excel -Path $reportPath -WorksheetName "Call Queues" -AutoSize -TableName "CallQueues" -TableStyle Medium2 -Append
             }
             
-            # Auto Attendants
             if ($AuditData.TeamsPhone.AutoAttendants -and $AuditData.TeamsPhone.AutoAttendants.Count -gt 0) {
                 $autoAttendantsData = foreach ($aa in $AuditData.TeamsPhone.AutoAttendants) {
                     [PSCustomObject]@{
@@ -3368,87 +3772,35 @@ function New-TeamsAuditExcelReport {
                 $autoAttendantsData | Export-Excel -Path $reportPath -WorksheetName "Auto Attendants" -AutoSize -TableName "AutoAttendants" -TableStyle Medium2 -Append
             }
             
-            # Resource Accounts
-            if ($AuditData.TeamsPhone.ResourceAccounts -and $AuditData.TeamsPhone.ResourceAccounts.Count -gt 0) {
-                $resourceAccountsData = foreach ($ra in $AuditData.TeamsPhone.ResourceAccounts) {
-                    [PSCustomObject]@{
-                        DisplayName = $ra.DisplayName
-                        UserPrincipalName = $ra.UserPrincipalName
-                        PhoneNumber = $ra.PhoneNumber
-                        ApplicationId = $ra.ApplicationId
-                    }
-                }
-                $resourceAccountsData | Export-Excel -Path $reportPath -WorksheetName "Resource Accounts" -AutoSize -TableName "ResourceAccounts" -TableStyle Medium2 -Append
-            }
-            
-            # Calling Policies
-            if ($AuditData.TeamsPhone.CallingPolicies -and $AuditData.TeamsPhone.CallingPolicies.Count -gt 0) {
-                $callingPoliciesData = foreach ($policy in $AuditData.TeamsPhone.CallingPolicies) {
-                    [PSCustomObject]@{
-                        Identity = $policy.Identity
-                        AllowPrivateCalling = $policy.AllowPrivateCalling
-                        AllowVoicemail = $policy.AllowVoicemail
-                        AllowCallGroups = $policy.AllowCallGroups
-                        AllowDelegation = $policy.AllowDelegation
-                        AllowCallForwardingToUser = $policy.AllowCallForwardingToUser
-                        AllowCallForwardingToPhone = $policy.AllowCallForwardingToPhone
-                        PreventTollBypass = $policy.PreventTollBypass
-                        BusyOnBusyEnabledType = $policy.BusyOnBusyEnabledType
-                        AllowCloudRecordingForCalls = $policy.AllowCloudRecordingForCalls
-                        AllowTranscriptionForCalling = $policy.AllowTranscriptionForCalling
-                        SpamFilteringEnabledType = $policy.SpamFilteringEnabledType
-                    }
-                }
-                $callingPoliciesData | Export-Excel -Path $reportPath -WorksheetName "Calling Policies" -AutoSize -TableName "CallingPolicies" -TableStyle Medium2 -Append
-            }
-            
-            # Emergency Calling Policies
             if ($AuditData.TeamsPhone.EmergencyCallingPolicies -and $AuditData.TeamsPhone.EmergencyCallingPolicies.Count -gt 0) {
                 $emergencyData = foreach ($policy in $AuditData.TeamsPhone.EmergencyCallingPolicies) {
                     [PSCustomObject]@{
                         Identity = $policy.Identity
                         Description = $policy.Description
+                        NotificationMode = $policy.NotificationMode
                         NotificationGroup = $policy.NotificationGroup
                         NotificationDialOutNumber = $policy.NotificationDialOutNumber
-                        NotificationMode = $policy.NotificationMode
                         ExternalLocationLookupMode = $policy.ExternalLocationLookupMode
                     }
                 }
-                $emergencyData | Export-Excel -Path $reportPath -WorksheetName "Emergency Calling" -AutoSize -TableName "EmergencyCalling" -TableStyle Medium2 -Append
+                $emergencyData | Export-Excel -Path $reportPath -WorksheetName "Emergency Policies" -AutoSize -TableName "EmergencyPolicies" -TableStyle Medium2 -Append
             }
             
-            # Network Sites
-            if ($AuditData.TeamsPhone.NetworkSites -and $AuditData.TeamsPhone.NetworkSites.Count -gt 0) {
-                $networkSitesData = foreach ($site in $AuditData.TeamsPhone.NetworkSites) {
-                    [PSCustomObject]@{
-                        Identity = $site.Identity
-                        Description = $site.Description
-                        NetworkRegionID = $site.NetworkRegionID
-                        EnableLocationBasedRouting = $site.EnableLocationBasedRouting
-                        EmergencyCallingPolicy = $site.EmergencyCallingPolicy
-                        EmergencyCallRoutingPolicy = $site.EmergencyCallRoutingPolicy
-                    }
-                }
-                $networkSitesData | Export-Excel -Path $reportPath -WorksheetName "Network Sites" -AutoSize -TableName "NetworkSites" -TableStyle Medium2 -Append
-            }
-            
-            # Phone Number Assignments
             if ($AuditData.TeamsPhone.PhoneNumberAssignments -and $AuditData.TeamsPhone.PhoneNumberAssignments.Count -gt 0) {
-                $phoneNumbersData = foreach ($num in $AuditData.TeamsPhone.PhoneNumberAssignments) {
+                $phoneNumberData = foreach ($number in $AuditData.TeamsPhone.PhoneNumberAssignments) {
                     [PSCustomObject]@{
-                        TelephoneNumber = $num.TelephoneNumber
-                        NumberType = $num.NumberType
-                        AssignmentCategory = $num.AssignmentCategory
-                        Capability = $num.Capability
-                        ActivationState = $num.ActivationState
-                        City = $num.City
-                        IsoCountryCode = $num.IsoCountryCode
+                        TelephoneNumber = $number.TelephoneNumber
+                        NumberType = $number.NumberType
+                        AssignmentCategory = $number.AssignmentCategory
+                        Capability = $number.Capability
+                        ActivationState = $number.ActivationState
+                        City = $number.City
+                        IsoCountryCode = $number.IsoCountryCode
                     }
                 }
-                $phoneNumbersData | Export-Excel -Path $reportPath -WorksheetName "Phone Numbers" -AutoSize -TableName "PhoneNumbers" -TableStyle Medium2 -Append
+                $phoneNumberData | Export-Excel -Path $reportPath -WorksheetName "Phone Numbers" -AutoSize -TableName "PhoneNumbers" -TableStyle Medium2 -Append
             }
             
-            # Voicemail Policies
             if ($AuditData.TeamsPhone.VoicemailPolicies -and $AuditData.TeamsPhone.VoicemailPolicies.Count -gt 0) {
                 $voicemailData = foreach ($policy in $AuditData.TeamsPhone.VoicemailPolicies) {
                     [PSCustomObject]@{
@@ -3463,37 +3815,6 @@ function New-TeamsAuditExcelReport {
                 $voicemailData | Export-Excel -Path $reportPath -WorksheetName "Voicemail Policies" -AutoSize -TableName "VoicemailPolicies" -TableStyle Medium2 -Append
             }
             
-            # Caller ID Policies
-            if ($AuditData.TeamsPhone.CallerIDPolicies -and $AuditData.TeamsPhone.CallerIDPolicies.Count -gt 0) {
-                $callerIdData = foreach ($policy in $AuditData.TeamsPhone.CallerIDPolicies) {
-                    [PSCustomObject]@{
-                        Identity = $policy.Identity
-                        Description = $policy.Description
-                        CallingIDSubstitute = $policy.CallingIDSubstitute
-                        EnableUserOverride = $policy.EnableUserOverride
-                        BlockIncomingPstnCallerID = $policy.BlockIncomingPstnCallerID
-                        CompanyName = $policy.CompanyName
-                    }
-                }
-                $callerIdData | Export-Excel -Path $reportPath -WorksheetName "Caller ID Policies" -AutoSize -TableName "CallerIDPolicies" -TableStyle Medium2 -Append
-            }
-            
-            # Call Park Policies
-            if ($AuditData.TeamsPhone.CallParkPolicies -and $AuditData.TeamsPhone.CallParkPolicies.Count -gt 0) {
-                $callParkData = foreach ($policy in $AuditData.TeamsPhone.CallParkPolicies) {
-                    [PSCustomObject]@{
-                        Identity = $policy.Identity
-                        Description = $policy.Description
-                        AllowCallPark = $policy.AllowCallPark
-                        PickupRangeStart = $policy.PickupRangeStart
-                        PickupRangeEnd = $policy.PickupRangeEnd
-                        ParkTimeoutSeconds = $policy.ParkTimeoutSeconds
-                    }
-                }
-                $callParkData | Export-Excel -Path $reportPath -WorksheetName "Call Park Policies" -AutoSize -TableName "CallParkPolicies" -TableStyle Medium2 -Append
-            }
-            
-            # Mobility Policies
             if ($AuditData.TeamsPhone.MobilityPolicies -and $AuditData.TeamsPhone.MobilityPolicies.Count -gt 0) {
                 $mobilityData = foreach ($policy in $AuditData.TeamsPhone.MobilityPolicies) {
                     [PSCustomObject]@{
@@ -3507,7 +3828,6 @@ function New-TeamsAuditExcelReport {
                 $mobilityData | Export-Excel -Path $reportPath -WorksheetName "Mobility Policies" -AutoSize -TableName "MobilityPolicies" -TableStyle Medium2 -Append
             }
             
-            # Compliance Recording Policies
             if ($AuditData.TeamsPhone.ComplianceRecordingPolicies -and $AuditData.TeamsPhone.ComplianceRecordingPolicies.Count -gt 0) {
                 $complianceData = foreach ($policy in $AuditData.TeamsPhone.ComplianceRecordingPolicies) {
                     [PSCustomObject]@{
@@ -3521,10 +3841,9 @@ function New-TeamsAuditExcelReport {
             }
         }
         
-        # Create Teams Devices worksheets
+        # Teams Devices worksheets
         Write-AuditLog -Message "  Creating Teams Devices worksheets..." -Level Info
         if ($AuditData.TeamsDevices) {
-            # IP Phone Policies
             if ($AuditData.TeamsDevices.IPPhonePolicies -and $AuditData.TeamsDevices.IPPhonePolicies.Count -gt 0) {
                 $ipPhoneData = foreach ($policy in $AuditData.TeamsDevices.IPPhonePolicies) {
                     [PSCustomObject]@{
@@ -3541,7 +3860,6 @@ function New-TeamsAuditExcelReport {
                 $ipPhoneData | Export-Excel -Path $reportPath -WorksheetName "IP Phone Policies" -AutoSize -TableName "IPPhonePolicies" -TableStyle Medium2 -Append
             }
             
-            # Shared Calling Policies
             if ($AuditData.TeamsDevices.SharedCallingPolicies -and $AuditData.TeamsDevices.SharedCallingPolicies.Count -gt 0) {
                 $sharedCallingData = foreach ($policy in $AuditData.TeamsDevices.SharedCallingPolicies) {
                     [PSCustomObject]@{
@@ -3551,10 +3869,9 @@ function New-TeamsAuditExcelReport {
                         EmergencyNumbers = ($policy.EmergencyNumbers -join ", ")
                     }
                 }
-                $sharedCallingData | Export-Excel -Path $reportPath -WorksheetName "Shared Calling Policies" -AutoSize -TableName "SharedCallingPolicies" -TableStyle Medium2 -Append
+                $sharedCallingData | Export-Excel -Path $reportPath -WorksheetName "Shared Calling" -AutoSize -TableName "SharedCallingPolicies" -TableStyle Medium2 -Append
             }
             
-            # Teams Room Accounts
             if ($AuditData.TeamsDevices.TeamsRoomAccounts -and $AuditData.TeamsDevices.TeamsRoomAccounts.Count -gt 0) {
                 $roomAccountsData = foreach ($account in $AuditData.TeamsDevices.TeamsRoomAccounts) {
                     [PSCustomObject]@{
@@ -3569,7 +3886,6 @@ function New-TeamsAuditExcelReport {
                 $roomAccountsData | Export-Excel -Path $reportPath -WorksheetName "Teams Room Accounts" -AutoSize -TableName "TeamsRoomAccounts" -TableStyle Medium2 -Append
             }
             
-            # Common Area Phone Accounts
             if ($AuditData.TeamsDevices.CommonAreaPhoneAccounts -and $AuditData.TeamsDevices.CommonAreaPhoneAccounts.Count -gt 0) {
                 $capAccountsData = foreach ($account in $AuditData.TeamsDevices.CommonAreaPhoneAccounts) {
                     [PSCustomObject]@{
@@ -3584,7 +3900,6 @@ function New-TeamsAuditExcelReport {
                 $capAccountsData | Export-Excel -Path $reportPath -WorksheetName "Common Area Phones" -AutoSize -TableName "CommonAreaPhones" -TableStyle Medium2 -Append
             }
             
-            # Device Statistics Summary
             if ($AuditData.TeamsDevices.Statistics) {
                 $deviceStatsData = @(
                     [PSCustomObject]@{ DeviceType = "Teams Rooms (Windows)"; Count = $AuditData.TeamsDevices.Statistics.TotalTeamsRoomsWindows }
